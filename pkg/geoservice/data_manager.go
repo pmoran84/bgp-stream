@@ -21,7 +21,6 @@ import (
 	"sync/atomic"
 
 	"github.com/cloudflare/ahocorasick"
-	"github.com/oschwald/maxminddb-golang"
 	"github.com/sudorandom/bgp-stream/pkg/sources"
 	"github.com/sudorandom/bgp-stream/pkg/utils"
 )
@@ -59,6 +58,7 @@ func (dm *DataManager) LoadWorldCities() {
 	}
 
 	if citiesReader != nil {
+		dm.geo.dataMu.Lock()
 		csvReader := csv.NewReader(citiesReader)
 		if _, err := csvReader.Read(); err != nil {
 			log.Printf("Warning: failed to read CSV header: %v", err)
@@ -115,10 +115,13 @@ func (dm *DataManager) LoadWorldCities() {
 			len(dm.geo.citiesByCountry["US"]), len(dm.geo.citiesByCountry["CN"]),
 			len(dm.geo.citiesByCountry["GB"]), len(dm.geo.citiesByCountry["DE"]),
 			len(dm.geo.citiesByCountry["FR"]))
+		dm.geo.dataMu.Unlock()
 	}
 }
 
 func (dm *DataManager) InitMatchers() {
+	dm.geo.dataMu.Lock()
+	defer dm.geo.dataMu.Unlock()
 	log.Printf("[GEO] Building Aho-Corasick matchers for %d countries...", len(dm.geo.citiesByCountry))
 	for cc := range dm.geo.citiesByCountry {
 		sort.Slice(dm.geo.citiesByCountry[cc], func(i, j int) bool {
@@ -149,6 +152,8 @@ func (dm *DataManager) LoadRemoteCityData() error {
 	if err != nil {
 		return err
 	}
+	dm.geo.dataMu.Lock()
+	defer dm.geo.dataMu.Unlock()
 	for _, c := range cities {
 		cc, ok := dm.geo.countryToISO[strings.ToUpper(c.Country)]
 		if !ok {
@@ -170,9 +175,43 @@ func (dm *DataManager) LoadRemoteCityData() error {
 	return nil
 }
 
-func (dm *DataManager) ProcessRIRData(geoReader *maxminddb.Reader) error {
+func (dm *DataManager) ProcessCustomHints(hints []string) {
+	if len(hints) == 0 {
+		return
+	}
+	ripeHints := make(map[string]ripeHint)
+	for _, h := range hints {
+		// Format: CIDR:City,CC
+		parts := strings.SplitN(h, ":", 2)
+		if len(parts) != 2 {
+			log.Printf("[CUSTOM] Invalid hint format (expected CIDR:City,CC): %s", h)
+			continue
+		}
+		prefix := parts[0]
+		locParts := strings.SplitN(parts[1], ",", 2)
+		if len(locParts) != 2 {
+			log.Printf("[CUSTOM] Invalid location format (expected City,CC): %s", parts[1])
+			continue
+		}
+		city, cc := strings.TrimSpace(locParts[0]), strings.ToUpper(strings.TrimSpace(locParts[1]))
+		hint := ripeHint{CC: cc, City: city}
+
+		// Try to resolve city to coordinates if possible
+		lat, lng, _ := dm.geo.ResolveCityToCoords(city, cc)
+		hint.Lat, hint.Lng = float32(lat), float32(lng)
+
+		ripeHints[prefix] = hint
+	}
+
+	if len(ripeHints) > 0 {
+		dm.geo.SetCustomHintsCIDR(ripeHints)
+		log.Printf("[CUSTOM] Loaded %d custom hints into CustomHintsDB", len(ripeHints))
+	}
+}
+
+func (dm *DataManager) ProcessRIRData() error {
 	log.Println("[GEO] Fetching RIR data...")
-	allRanges, countryOnlyRanges := dm.fetchRIRData(geoReader)
+	allRanges, countryOnlyRanges := dm.fetchRIRData()
 	log.Printf("[GEO] RIR fetch complete. Total ranges: %d city-level, %d country-only", len(allRanges), len(countryOnlyRanges))
 
 	segments := dm.flattenPrefixData(allRanges)
@@ -199,21 +238,21 @@ func (dm *DataManager) ProcessRIRData(geoReader *maxminddb.Reader) error {
 	return nil
 }
 
-func (dm *DataManager) fetchRIRData(geoReader *maxminddb.Reader) (allRanges, countryOnlyRanges []ipRange) {
+func (dm *DataManager) fetchRIRData() (allRanges, countryOnlyRanges []ipRange) {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, src := range sources.GetRIRSources() {
 		wg.Add(1)
 		go func(s sources.RIRSource) {
 			defer wg.Done()
-			dm.processRIRSource(s, geoReader, &mu, &allRanges, &countryOnlyRanges)
+			dm.processRIRSource(s, &mu, &allRanges, &countryOnlyRanges)
 		}(src)
 	}
 	wg.Wait()
 	return allRanges, countryOnlyRanges
 }
 
-func (dm *DataManager) processRIRSource(src sources.RIRSource, geoReader *maxminddb.Reader, mu *sync.Mutex, allRanges, countryOnlyRanges *[]ipRange) {
+func (dm *DataManager) processRIRSource(src sources.RIRSource, mu *sync.Mutex, allRanges, countryOnlyRanges *[]ipRange) {
 	rc, err := utils.GetCachedReader(src.URL, true, "[RIR-"+src.Name+"]")
 	if err != nil {
 		log.Printf("[RIR-%s] Error fetching data: %v", src.Name, err)
@@ -252,17 +291,16 @@ func (dm *DataManager) processRIRSource(src sources.RIRSource, geoReader *maxmin
 			for c2 := uint32(c); c2 > 1; c2 >>= 1 {
 				p--
 			}
-			dm.handleRIRRange(start, start+uint32(c)-1, strings.ToUpper(parts[1]), p, geoReader, mu, allRanges, countryOnlyRanges)
+			dm.handleRIRRange(start, start+uint32(c)-1, strings.ToUpper(parts[1]), p, mu, allRanges, countryOnlyRanges)
 			count++
 		}
 	}
 	log.Printf("[RIR-%s] Loaded %d ranges", src.Name, count)
 }
 
-func (dm *DataManager) handleRIRRange(start, end uint32, cc string, priority int, geoReader *maxminddb.Reader, mu *sync.Mutex, allRanges, countryOnlyRanges *[]ipRange) {
+func (dm *DataManager) handleRIRRange(start, end uint32, cc string, priority int, mu *sync.Mutex, allRanges, countryOnlyRanges *[]ipRange) {
 	var lat, lng float64
 	var city string
-	var ok bool
 
 	ipsToTry := []uint32{start}
 	if end > start {
@@ -273,30 +311,10 @@ func (dm *DataManager) handleRIRRange(start, end uint32, cc string, priority int
 	}
 
 	for _, testIP := range ipsToTry {
-		var record map[string]interface{}
-		ip := make(net.IP, 4)
-		binary.BigEndian.PutUint32(ip, testIP)
-		if err := geoReader.Lookup(ip, &record); err == nil {
-			lat, lng, ok = dm.geo.extractCoords(record)
-			if ok {
-				city = dm.geo.extractCity(record)
-				break
-			} else {
-				// Fallback to City + CC -> Coords
-				cityName := dm.geo.extractCity(record)
-				recordCC := dm.geo.extractCC(record)
-				if recordCC == "" {
-					recordCC = cc
-				}
-
-				if cityName != "" {
-					lat, lng, _ = dm.geo.ResolveCityToCoords(cityName, recordCC)
-					if lat != 0 || lng != 0 {
-						city = cityName
-						break
-					}
-				}
-			}
+		lat, lng, _, _ = dm.geo.GetIPCoords(testIP)
+		if lat != 0 || lng != 0 {
+			// We found something via our hints or other sources
+			break
 		}
 	}
 
@@ -586,9 +604,8 @@ func (dm *DataManager) processWhoisRecord(recordFields map[string][]string, city
 		}
 	}
 	if (lat == 0 && lng == 0) && city != "" {
-		if coords, ok := dm.geo.cityCoords[cityKey{city: strings.ToLower(city), cc: cc}]; ok {
-			lat, lng = coords[0], coords[1]
-		}
+		l, ln, _ := dm.geo.ResolveCityToCoords(city, cc)
+		lat, lng = float32(l), float32(ln)
 	}
 	if city != "" {
 		*cityHits++
@@ -639,9 +656,8 @@ func (dm *DataManager) ProcessPeeringDBData() {
 	ixMap := make(map[uint32]ripeHint)
 	for _, ix := range pdb.IX.Data {
 		hint := ripeHint{CC: ix.CC, City: ix.City}
-		if c, ok := dm.geo.cityCoords[cityKey{city: strings.ToLower(ix.City), cc: strings.ToUpper(ix.CC)}]; ok {
-			hint.Lat, hint.Lng = c[0], c[1]
-		}
+		lat, lng, _ := dm.geo.ResolveCityToCoords(ix.City, ix.CC)
+		hint.Lat, hint.Lng = float32(lat), float32(lng)
 		ixMap[ix.ID] = hint
 	}
 
@@ -722,7 +738,12 @@ func (dm *DataManager) extractCityHeuristic(val, cc string) string {
 	valLower := []byte(strings.ToLower(val))
 
 	// 1. Check for known cities in this country using Aho-Corasick
-	if matcher, ok := dm.geo.cityMatchers[ccNorm]; ok {
+	dm.geo.dataMu.RLock()
+	matcher, hasMatcher := dm.geo.cityMatchers[ccNorm]
+	cities := dm.geo.citiesByCountry[ccNorm]
+	dm.geo.dataMu.RUnlock()
+
+	if hasMatcher {
 		matches := matcher.Match(valLower)
 		if len(matches) > 0 {
 			// Aho-Corasick matches all occurrences.
@@ -730,7 +751,6 @@ func (dm *DataManager) extractCityHeuristic(val, cc string) string {
 			// matches based on their end position in the text.
 			// Let's find the match that corresponds to the longest city name
 			// from our original list.
-			cities := dm.geo.citiesByCountry[ccNorm]
 			var bestCity string
 			for _, cityIdx := range matches {
 				city := cities[cityIdx]

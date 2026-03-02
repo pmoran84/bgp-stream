@@ -699,7 +699,7 @@ func (e *Engine) StartMetricsLoop() {
 		e.updateMetricSnapshots(interval)
 
 		logTicks++
-		if logTicks >= 60 {
+		if logTicks >= 10 {
 			logTicks = 0
 			e.geo.ReportGeoMetrics()
 			if e.processor != nil {

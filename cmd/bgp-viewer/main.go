@@ -12,6 +12,17 @@ import (
 	"github.com/sudorandom/bgp-stream/pkg/bgpengine"
 )
 
+type multiFlag []string
+
+func (f *multiFlag) String() string {
+	return ""
+}
+
+func (f *multiFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
 var (
 	renderWidth        = flag.Int("width", 3840, "Internal rendering width")
 	renderHeight       = flag.Int("height", 2160, "Internal rendering height")
@@ -25,9 +36,11 @@ var (
 	captureInterval    = flag.Duration("capture-interval", 0, "Interval to periodically capture high-quality frames (e.g., 1m, 1h). 0 to disable.")
 	captureDir         = flag.String("capture-dir", "captures", "Directory to store captured frames")
 	minimalUI          = flag.Bool("minimal-ui", false, "Start with only the map and now-playing panel visible")
+	mmdbFiles          multiFlag
 )
 
 func main() {
+	flag.Var(&mmdbFiles, "mmdb", "Path to an additional .mmdb file (can be specified multiple times)")
 	flag.Parse()
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -44,6 +57,7 @@ func initEngine() *bgpengine.Engine {
 	engine.FrameCaptureInterval = *captureInterval
 	engine.FrameCaptureDir = *captureDir
 	engine.MinimalUI = *minimalUI
+	engine.MMDBFiles = mmdbFiles
 
 	// If audio-fd is provided, use it for streaming audio
 	if *audioFd != -1 {

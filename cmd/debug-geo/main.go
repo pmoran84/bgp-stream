@@ -14,8 +14,21 @@ import (
 	"github.com/sudorandom/bgp-stream/pkg/utils"
 )
 
+type multiFlag []string
+
+func (f *multiFlag) String() string {
+	return ""
+}
+
+func (f *multiFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
 func main() {
 	ipStr := flag.String("ip", "", "IP address to resolve")
+	var mmdbFiles multiFlag
+	flag.Var(&mmdbFiles, "mmdb", "Path to an additional .mmdb file (can be specified multiple times)")
 	flag.Parse()
 
 	// Initialize GeoService
@@ -34,12 +47,10 @@ func main() {
 		log.Printf("Warning: failed to load remote city data: %v", err)
 	}
 
-	// Initialize GeoIP
-	geoReader, err := geoservice.GetGeoIPReader()
-	if err == nil {
-		geo.SetGeoIPReader(geoReader)
-	} else {
-		log.Printf("Warning: Failed to open GeoIP database: %v", err)
+	for _, path := range mmdbFiles {
+		if err := geo.AddMMDBReader(path); err != nil {
+			log.Printf("Warning: failed to load MMDB database %s: %v", path, err)
+		}
 	}
 
 	// Load prefix data

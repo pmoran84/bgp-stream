@@ -5,22 +5,32 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
-	"github.com/sudorandom/bgp-stream/pkg/bgpengine"
 	"github.com/sudorandom/bgp-stream/pkg/geoservice"
 	"github.com/sudorandom/bgp-stream/pkg/utils"
 )
 
+type multiFlag []string
+
+func (f *multiFlag) String() string {
+	return strings.Join(*f, ", ")
+}
+
+func (f *multiFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
 func main() {
 	fresh := flag.Bool("fresh", false, "Re-download all source files even if they are already cached")
-	width := flag.Int("width", 3840, "Internal rendering width")
-	height := flag.Int("height", 2160, "Internal rendering height")
-	scale := flag.Float64("scale", 760.0, "Internal rendering scale")
+	var customLocations multiFlag
+	flag.Var(&customLocations, "custom-locations", "Custom location override (format: CIDR:City,CC, e.g. 1.1.1.0/24:Sydney,AU). Can be specified multiple times.")
 	flag.Parse()
 
 	// Initialize GeoService
-	geo := geoservice.NewGeoService(*width, *height, *scale)
+	geo := geoservice.NewGeoService(3840, 2160, 760.0)
 
 	// Open Databases in Read-Write mode
 	if err := geo.OpenHintDBs("data", false); err != nil {
@@ -56,33 +66,31 @@ func main() {
 		_ = geo.ClearAll()
 	}
 
+	// 1. Reference Data (Load these first as others depend on them)
+	log.Println("--- Reference Data ---")
+	if err := dm.DownloadWorldCities(*fresh); err != nil {
+		log.Printf("Warning: failed to download worldcities: %v", err)
+	}
+	dm.LoadWorldCities()
+
+	if err := dm.LoadRemoteCityData(); err != nil {
+		log.Printf("Warning: failed to load remote city data: %v", err)
+	}
+
+	asn := utils.NewASNMapping()
+	if err := asn.Load(); err != nil {
+		log.Printf("Warning: failed to load ASN mapping: %v", err)
+	}
+
+	// 2. Parallel Processing for main datasets
 	var wg sync.WaitGroup
-
-	// Task 1: World Cities & Hubs
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		log.Println("--- World Cities ---")
-		if err := dm.DownloadWorldCities(*fresh); err != nil {
-			log.Printf("Warning: failed to download worldcities: %v", err)
-		}
-		dm.LoadWorldCities()
-
-		if err := dm.LoadRemoteCityData(); err != nil {
-			log.Printf("Warning: failed to load remote city data: %v", err)
-		}
-	}()
 
 	// Task 2: RIR Data
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		log.Println("--- RIR / Prefix Data ---")
-		geoReader, err := geoservice.GetGeoIPReader()
-		if err != nil {
-			log.Printf("Warning: GeoIP reader not available: %v", err)
-		}
-		if err := dm.ProcessRIRData(geoReader); err != nil {
+		if err := dm.ProcessRIRData(); err != nil {
 			log.Printf("Error processing RIR data: %v", err)
 		}
 	}()
@@ -103,41 +111,23 @@ func main() {
 		dm.ProcessPeeringDBData()
 	}()
 
-	// Task 5: WHOIS (Needs city list loaded first for heuristic matching)
+	// Task 5: WHOIS
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		log.Println("--- WHOIS ---")
-		// Wait a small amount for Task 1 to at least start loading cities
-		// In reality, ProcessBulkWhoisData calls InitMatchers which uses dm.geo.citiesByCountry.
-		// So we actually NEED Task 1 to finish LoadWorldCities() first.
-		// Let's refine this to be more precise below if needed, but for now
-		// dm.ProcessBulkWhoisData internally calls dm.InitMatchers() which depends on LoadWorldCities.
 		dm.ProcessBulkWhoisData()
 	}()
 
-	// Task 6: ASN Mapping
+	// Task 7: Custom Hints
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		log.Println("--- ASN Mapping ---")
-		asn := utils.NewASNMapping()
-		if err := asn.Load(); err != nil {
-			log.Printf("Warning: failed to load ASN mapping: %v", err)
-		}
+		log.Println("--- Custom Hints ---")
+		dm.ProcessCustomHints(customLocations)
 	}()
 
 	wg.Wait()
-
-	// Task 7: Background Map (Safe to do after everything else or just whenever)
-	log.Println("--- Background Map ---")
-	engine := bgpengine.NewEngine(*width, *height, *scale)
-	if err := engine.InitGeoOnly(false); err != nil {
-		log.Printf("Warning: failed to init engine for background generation: %v", err)
-	}
-	if err := engine.GenerateInitialBackground(); err != nil {
-		log.Printf("Warning: failed to generate initial background: %v", err)
-	}
 
 	log.Println("Data management tasks complete.")
 }

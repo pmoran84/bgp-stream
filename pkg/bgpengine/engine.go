@@ -224,6 +224,7 @@ type Engine struct {
 	asnMapping  *utils.ASNMapping
 	geoResolver geoservice.GeoResolver
 	dataMgr     *geoservice.DataManager
+	MMDBFiles   []string
 
 	MinimalUI           bool
 	minimalUIKeyPressed bool
@@ -446,12 +447,10 @@ func (e *Engine) InitGeoOnly(readOnly bool) error {
 		log.Printf("Warning: failed to load remote city data: %v", err)
 	}
 
-	// Initialize GeoIP
-	geoReader, err := geoservice.GetGeoIPReader()
-	if err == nil {
-		e.geo.SetGeoIPReader(geoReader)
-	} else {
-		log.Printf("Warning: Failed to open GeoIP database: %v", err)
+	for _, path := range e.MMDBFiles {
+		if err := e.geo.AddMMDBReader(path); err != nil {
+			log.Printf("Warning: failed to load MMDB database %s: %v", path, err)
+		}
 	}
 
 	e.geoResolver = e
@@ -687,6 +686,16 @@ func (e *Engine) cacheBackground(cacheFile string, cpuImg *image.RGBA) {
 	} else {
 		log.Printf("Background map cached to %s", cacheFile)
 	}
+}
+
+func (e *Engine) GenerateInitialBackground() error {
+	if err := os.MkdirAll("data", 0o755); err != nil {
+		log.Printf("Warning: Failed to create data directory: %v", err)
+	}
+	if err := e.generateBackground(); err != nil {
+		return fmt.Errorf("failed to generate background: %w", err)
+	}
+	return nil
 }
 
 type point struct{ x, y float64 }
@@ -1439,16 +1448,6 @@ func (e *Engine) InitTrendlineTexture() {
 		}
 	}
 	e.trendCircleImg.WritePixels(pixels)
-}
-
-func (e *Engine) GenerateInitialBackground() error {
-	if err := os.MkdirAll("data", 0o755); err != nil {
-		log.Printf("Warning: Failed to create data directory: %v", err)
-	}
-	if err := e.generateBackground(); err != nil {
-		return fmt.Errorf("failed to generate background: %w", err)
-	}
-	return nil
 }
 
 // StartBufferLoop runs a background loop that periodically processes buffered BGP events.

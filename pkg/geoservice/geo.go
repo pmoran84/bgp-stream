@@ -33,8 +33,9 @@ type CityHub struct {
 
 type GeoMetrics struct {
 	CacheHits    atomic.Uint64
+	CustomHits   atomic.Uint64
 	CloudHits    atomic.Uint64
-	GeoIPHits    atomic.Uint64
+	MMDBHits     atomic.Uint64
 	RIRHits      atomic.Uint64
 	WHOISHits    atomic.Uint64
 	PeeringHits  atomic.Uint64
@@ -56,6 +57,7 @@ type GeoService struct {
 	countryHubs       map[string][]CityHub
 	prefixToCityCache map[uint32]cacheEntry
 	cacheMu           sync.Mutex
+	dataMu            sync.RWMutex
 	prefixData        PrefixData
 	hubsData          PrefixData
 	cityCoords        map[cityKey][2]float32
@@ -67,7 +69,9 @@ type GeoService struct {
 	ripeHints         *utils.DiskTrie
 	peeringHints      *utils.DiskTrie
 	cloudHints        *utils.DiskTrie
-	geoReader         *maxminddb.Reader
+	customHints       *utils.DiskTrie
+	mmdbHints         *utils.DiskTrie
+	geoReaders        []*maxminddb.Reader
 	metrics           GeoMetrics
 }
 
@@ -92,8 +96,14 @@ func NewGeoService(width, height int, scale float64) *GeoService {
 	}
 }
 
-func (g *GeoService) SetGeoIPReader(r *maxminddb.Reader) {
-	g.geoReader = r
+func (g *GeoService) AddMMDBReader(path string) error {
+	db, err := maxminddb.Open(path)
+	if err != nil {
+		return err
+	}
+	g.geoReaders = append(g.geoReaders, db)
+	log.Printf("[GEO] Added MMDB reader: %s", path)
+	return nil
 }
 
 func (g *GeoService) SetPrefixData(data PrefixData) {
@@ -104,10 +114,12 @@ func (g *GeoService) SetHubsData(data PrefixData) {
 	g.hubsData = data
 }
 
-func (g *GeoService) SetHintDBs(ripe, peering, cloud *utils.DiskTrie) {
+func (g *GeoService) SetHintDBs(ripe, peering, cloud, custom, mmdb *utils.DiskTrie) {
 	g.ripeHints = ripe
 	g.peeringHints = peering
 	g.cloudHints = cloud
+	g.customHints = custom
+	g.mmdbHints = mmdb
 }
 
 func (g *GeoService) OpenHintDBs(dir string, readOnly bool) error {
@@ -115,11 +127,15 @@ func (g *GeoService) OpenHintDBs(dir string, readOnly bool) error {
 	ripePath := filepath.Join(dir, "ripe-hints.db")
 	peeringPath := filepath.Join(dir, "peering-hints.db")
 	cloudPath := filepath.Join(dir, "cloud-hints.db")
+	customPath := filepath.Join(dir, "custom-hints.db")
+	mmdbPath := filepath.Join(dir, "mmdb-hints.db")
 
 	if readOnly {
 		g.ripeHints, _ = utils.OpenDiskTrieReadOnly(ripePath)
 		g.peeringHints, _ = utils.OpenDiskTrieReadOnly(peeringPath)
 		g.cloudHints, _ = utils.OpenDiskTrieReadOnly(cloudPath)
+		g.customHints, _ = utils.OpenDiskTrieReadOnly(customPath)
+		g.mmdbHints, _ = utils.OpenDiskTrieReadOnly(mmdbPath)
 	} else {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
@@ -136,6 +152,14 @@ func (g *GeoService) OpenHintDBs(dir string, readOnly bool) error {
 		if err != nil {
 			log.Printf("Warning: Failed to open Cloud hints database: %v", err)
 		}
+		g.customHints, err = utils.OpenDiskTrie(customPath)
+		if err != nil {
+			log.Printf("Warning: Failed to open Custom hints database: %v", err)
+		}
+		g.mmdbHints, err = utils.OpenDiskTrie(mmdbPath)
+		if err != nil {
+			log.Printf("Warning: Failed to open MMDB hints database: %v", err)
+		}
 	}
 	return nil
 }
@@ -150,6 +174,14 @@ func (g *GeoService) Close() error {
 	if g.cloudHints != nil {
 		_ = g.cloudHints.Close()
 	}
+	if g.customHints != nil {
+		_ = g.customHints.Close()
+	}
+	for _, r := range g.geoReaders {
+		if r != nil {
+			_ = r.Close()
+		}
+	}
 	return nil
 }
 
@@ -163,27 +195,10 @@ func (g *GeoService) ClearAll() error {
 	if g.cloudHints != nil {
 		_ = g.cloudHints.Clear()
 	}
+	if g.customHints != nil {
+		_ = g.customHints.Clear()
+	}
 	return nil
-}
-
-func GetGeoIPReader() (*maxminddb.Reader, error) {
-	var geoReader *maxminddb.Reader
-	if f, err := os.ReadFile("data/ipinfo_lite.mmdb"); err == nil {
-		geoReader, _ = maxminddb.FromBytes(f)
-		if geoReader != nil {
-			log.Println("Using ipinfo_lite.mmdb from disk")
-		}
-	}
-	if geoReader == nil && len(geoIPDB) > 0 {
-		geoReader, _ = maxminddb.FromBytes(geoIPDB)
-		if geoReader != nil {
-			log.Println("Using embedded ipinfo_lite.mmdb")
-		}
-	}
-	if geoReader == nil {
-		return nil, fmt.Errorf("no GeoIP database available (ipinfo_lite.mmdb)")
-	}
-	return geoReader, nil
 }
 
 func (g *GeoService) SetRIPEHints(hints map[uint32]ripeHint) {
@@ -242,17 +257,32 @@ func (g *GeoService) SetPeeringHintsCIDR(hints map[string]ripeHint) {
 	}
 }
 
+func (g *GeoService) SetCustomHintsCIDR(hints map[string]ripeHint) {
+	if g.customHints == nil {
+		return
+	}
+	data := make(map[string][]byte)
+	for prefix, hint := range hints {
+		b, _ := json.Marshal(hint)
+		data[prefix] = b
+	}
+	if err := g.customHints.BatchInsert(data); err != nil {
+		log.Printf("[GEO] Error batch inserting Custom CIDR hints: %v", err)
+	}
+}
+
 func (g *GeoService) ReportGeoMetrics() {
 	cache := g.metrics.CacheHits.Swap(0)
+	custom := g.metrics.CustomHits.Swap(0)
 	cloud := g.metrics.CloudHits.Swap(0)
-	geoip := g.metrics.GeoIPHits.Swap(0)
+	mmdb := g.metrics.MMDBHits.Swap(0)
 	rir := g.metrics.RIRHits.Swap(0)
 	whois := g.metrics.WHOISHits.Swap(0)
 	peering := g.metrics.PeeringHits.Swap(0)
 	hubs := g.metrics.HubHits.Swap(0)
 	unknown := g.metrics.UnknownHits.Swap(0)
 	resets := g.metrics.CacheResets.Swap(0)
-	total := cloud + geoip + rir + whois + peering + hubs + unknown
+	total := custom + cloud + mmdb + rir + whois + peering + hubs + unknown
 
 	if total == 0 {
 		return
@@ -268,8 +298,9 @@ func (g *GeoService) ReportGeoMetrics() {
 		}
 	}
 
+	appendMetric("Custom", custom)
 	appendMetric("Cloud", cloud)
-	appendMetric("GeoIP", geoip)
+	appendMetric("MMDB", mmdb)
 	appendMetric("RIR", rir)
 	appendMetric("WHOIS", whois)
 	appendMetric("Peering", peering)
@@ -287,6 +318,8 @@ type ResolutionType string
 
 const (
 	ResCache   ResolutionType = "Cache"
+	ResCustom  ResolutionType = "Custom"
+	ResMMDB    ResolutionType = "MMDB"
 	ResCloud   ResolutionType = "Cloud"
 	ResGeoIP   ResolutionType = "GeoIP"
 	ResRIR     ResolutionType = "RIR"
@@ -323,10 +356,12 @@ func (g *GeoService) GetIPCoords(ip uint32) (lat, lng float64, countryCode strin
 
 func (g *GeoService) incrementSourceMetric(resType ResolutionType) {
 	switch resType {
+	case ResCustom:
+		g.metrics.CustomHits.Add(1)
+	case ResMMDB, ResGeoIP:
+		g.metrics.MMDBHits.Add(1)
 	case ResCloud:
 		g.metrics.CloudHits.Add(1)
-	case ResGeoIP:
-		g.metrics.GeoIPHits.Add(1)
 	case ResRIR:
 		g.metrics.RIRHits.Add(1)
 	case ResWHOIS:
@@ -341,7 +376,22 @@ func (g *GeoService) incrementSourceMetric(resType ResolutionType) {
 }
 
 func (g *GeoService) resolveIP(ip uint32) (lat, lng float64, countryCode string, resType ResolutionType) {
-	// Stage 1: Cloud Trie (Highest priority, very specific)
+	// Stage 0: Custom Hints (Explicit overrides)
+	if lat, lng, cc, ok := g.resolveFromHints(g.customHints, ip); ok {
+		return lat, lng, cc, ResCustom
+	}
+
+	// Stage 1: MMDB Hints (Pre-processed MMDB files)
+	if lat, lng, cc, ok := g.resolveFromHints(g.mmdbHints, ip); ok {
+		return lat, lng, cc, ResMMDB
+	}
+
+	// Stage 2: Direct MMDB (Runtime loaded files)
+	if lat, lng, cc, _, ok := g.resolveFromMMDBs(ip); ok {
+		return lat, lng, cc, ResGeoIP
+	}
+
+	// Stage 3: Cloud Trie (Highest priority, very specific)
 	if lat, lng, cc, ok := g.resolveFromCloudTrie(ip); ok {
 		return lat, lng, cc, ResCloud
 	}
@@ -349,23 +399,14 @@ func (g *GeoService) resolveIP(ip uint32) (lat, lng float64, countryCode string,
 	// Define metadata holders for fallbacks
 	var bestCC string
 
-	// Stage 2: Direct MMDB (Real-time)
-	if lat, lng, cc, _, ok := g.resolveFromMMDBInternal(ip); ok {
-		return lat, lng, cc, ResGeoIP
+	// Stage 4: PeeringDB Hints (Infrastructure)
+	if lat, lng, cc, ok := g.resolveFromHints(g.peeringHints, ip); ok {
+		return lat, lng, cc, ResPeering
 	} else if cc != "" {
 		bestCC = cc
 	}
 
-	// Stage 3: PeeringDB Hints (Infrastructure)
-	if lat, lng, cc, ok := g.resolveFromHints(g.peeringHints, ip); ok {
-		return lat, lng, cc, ResPeering
-	} else if cc != "" {
-		if bestCC == "" {
-			bestCC = cc
-		}
-	}
-
-	// Stage 4: RIPE WHOIS hints (Background loaded)
+	// Stage 5: RIPE WHOIS hints (Background loaded)
 	if lat, lng, cc, ok := g.resolveFromHints(g.ripeHints, ip); ok {
 		return lat, lng, cc, ResWHOIS
 	} else if cc != "" {
@@ -374,7 +415,7 @@ func (g *GeoService) resolveIP(ip uint32) (lat, lng float64, countryCode string,
 		}
 	}
 
-	// Stage 5: RIR-indexed data
+	// Stage 6: RIR-indexed data
 	if lat, lng, cc, _, ok := g.resolveFromRIRInternal(ip); ok {
 		return lat, lng, cc, ResRIR
 	} else if cc != "" {
@@ -383,7 +424,7 @@ func (g *GeoService) resolveIP(ip uint32) (lat, lng float64, countryCode string,
 		}
 	}
 
-	// Stage 6: RIR-indexed hub data (Country only)
+	// Stage 7: RIR-indexed hub data (Country only)
 	if cc, city, ok := g.resolveFromHubsInternal(ip); ok {
 		if city != "" && cc != "" {
 			if l, ln, _ := g.ResolveCityToCoords(city, cc); l != 0 || ln != 0 {
@@ -407,11 +448,15 @@ func (g *GeoService) resolveFinalFallback(ip uint32, bestCC string) (lat, lng fl
 
 		// Absolute final fallback: Country center
 		ccNorm := strings.ToUpper(bestCC)
-		if coords, ok := g.countryCoords[ccNorm]; ok {
-			countryName := bestCC
-			if name, ok := g.isoToCountry[ccNorm]; ok {
-				countryName = name
-			}
+		g.dataMu.RLock()
+		coords, ok := g.countryCoords[ccNorm]
+		countryName := bestCC
+		if name, okName := g.isoToCountry[ccNorm]; okName {
+			countryName = name
+		}
+		g.dataMu.RUnlock()
+
+		if ok {
 			return float64(coords[0]), float64(coords[1]), countryName, ResHubs
 		}
 		return 0, 0, bestCC, ResUnknown
@@ -420,27 +465,138 @@ func (g *GeoService) resolveFinalFallback(ip uint32, bestCC string) (lat, lng fl
 	return 0, 0, "", ResUnknown
 }
 
-func (g *GeoService) resolveFromMMDBInternal(ip uint32) (lat, lng float64, cc, city string, ok bool) {
-	if g.geoReader == nil {
+func (g *GeoService) resolveFromMMDBs(ip uint32) (lat, lng float64, cc, city string, ok bool) {
+	if len(g.geoReaders) == 0 {
 		return 0, 0, "", "", false
 	}
-	var record map[string]interface{}
 	ipObj := make(net.IP, 4)
 	binary.BigEndian.PutUint32(ipObj, ip)
-	if err := g.geoReader.Lookup(ipObj, &record); err == nil {
-		lat, lng, ok = g.extractCoords(record)
-		cc = g.extractCC(record)
-		city = g.extractCity(record)
-		if ok {
-			return lat, lng, cc, city, true
-		}
-		if city != "" && cc != "" {
-			if l, ln, _ := g.ResolveCityToCoords(city, cc); l != 0 || ln != 0 {
-				return l, ln, cc, city, true
+
+	for _, reader := range g.geoReaders {
+		var record map[string]interface{}
+		if err := reader.Lookup(ipObj, &record); err == nil && record != nil {
+			lat, lng, ok = g.ExtractCoords(record)
+			cc = g.ExtractCC(record)
+			city = g.ExtractCity(record)
+			if ok {
+				return lat, lng, cc, city, true
+			}
+			if city != "" && cc != "" {
+				if l, ln, _ := g.ResolveCityToCoords(city, cc); l != 0 || ln != 0 {
+					return l, ln, cc, city, true
+				}
 			}
 		}
 	}
 	return 0, 0, cc, city, false
+}
+
+func (g *GeoService) ExtractCity(record map[string]interface{}) string {
+	cityKeys := []string{"city", "City", "city_name"}
+	for _, k := range cityKeys {
+		if v, ok := record[k].(string); ok {
+			return v
+		}
+	}
+
+	// Check MaxMind style nested city names
+	if city, ok := record["city"].(map[string]interface{}); ok {
+		if names, ok := city["names"].(map[string]interface{}); ok {
+			if name, ok := names["en"].(string); ok {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+func (g *GeoService) ExtractCC(record map[string]interface{}) string {
+	cc := ""
+
+	// Check for "country_code" first (common in IPInfo, IP2Location, etc.)
+	if c, ok := record["country_code"].(string); ok && len(c) == 2 {
+		cc = c
+	}
+
+	// Check for "country" next
+	if cc == "" {
+		if country, ok := record["country"].(map[string]interface{}); ok {
+			if iso, ok := country["iso_code"].(string); ok && len(iso) == 2 {
+				cc = iso
+			}
+		} else if c, ok := record["country"].(string); ok && len(c) == 2 {
+			cc = c
+		}
+	}
+
+	if cc == "" {
+		// If we still have nothing, let's see what was in there that we rejected
+		if c, ok := record["country_code"].(string); ok {
+			cc = c
+		} else if c, ok := record["country"].(string); ok {
+			cc = c
+		}
+	}
+
+	sanitized := g.SanitizeCC(cc)
+	if sanitized == "" && cc != "" {
+		return ""
+	}
+	return sanitized
+}
+
+func (g *GeoService) ExtractCoords(record map[string]interface{}) (lat, lng float64, ok bool) {
+	// 1. Check MaxMind style: location -> latitude/longitude
+	if loc, ok := record["location"].(map[string]interface{}); ok {
+		lat, ok1 := g.AsFloat(loc["latitude"])
+		if !ok1 {
+			lat, ok1 = g.AsFloat(loc["lat"])
+		}
+		lng, ok2 := g.AsFloat(loc["longitude"])
+		if !ok2 {
+			lng, ok2 = g.AsFloat(loc["lng"])
+		}
+		if !ok2 {
+			lng, ok2 = g.AsFloat(loc["long"])
+		}
+		if ok1 && ok2 {
+			return lat, lng, true
+		}
+	}
+
+	// 2. Check flat style (IPInfo and others)
+	lat, ok1 := g.AsFloat(record["latitude"])
+	if !ok1 {
+		lat, ok1 = g.AsFloat(record["lat"])
+	}
+	if !ok1 {
+		lat, ok1 = g.AsFloat(record["Latitude"])
+	}
+
+	lng, ok2 := g.AsFloat(record["longitude"])
+	if !ok2 {
+		lng, ok2 = g.AsFloat(record["lng"])
+	}
+	if !ok2 {
+		lng, ok2 = g.AsFloat(record["long"])
+	}
+	if !ok2 {
+		lng, ok2 = g.AsFloat(record["Longitude"])
+	}
+
+	if ok1 && ok2 {
+		return lat, lng, true
+	}
+
+	// 3. Check IPInfo "loc" field: "lat,lng" string
+	if locStr, ok := record["loc"].(string); ok {
+		var lat, lng float64
+		if _, err := fmt.Sscanf(locStr, "%f,%f", &lat, &lng); err == nil {
+			return lat, lng, true
+		}
+	}
+
+	return 0, 0, false
 }
 
 func (g *GeoService) resolveFromHints(trie *utils.DiskTrie, ip uint32) (lat, lng float64, cc string, ok bool) {
@@ -465,8 +621,8 @@ func (g *GeoService) resolveFromRIRInternal(ip uint32) (lat, lng float64, cc, ci
 	if loc == nil {
 		return 0, 0, "", "", false
 	}
-	lat, _ = g.asFloat(loc[0])
-	lng, _ = g.asFloat(loc[1])
+	lat, _ = g.AsFloat(loc[0])
+	lng, _ = g.AsFloat(loc[1])
 	ccRaw, _ := loc[2].(string)
 	cc = g.SanitizeCC(ccRaw)
 	city, _ = loc[3].(string)
@@ -508,60 +664,6 @@ func (g *GeoService) lookupHint(trie *utils.DiskTrie, ip uint32) (ripeHint, bool
 	return hint, true
 }
 
-func (g *GeoService) extractCity(record map[string]interface{}) string {
-	cityKeys := []string{"city", "City", "city_name"}
-	for _, k := range cityKeys {
-		if v, ok := record[k].(string); ok {
-			return v
-		}
-	}
-
-	// Check MaxMind style nested city names
-	if city, ok := record["city"].(map[string]interface{}); ok {
-		if names, ok := city["names"].(map[string]interface{}); ok {
-			if name, ok := names["en"].(string); ok {
-				return name
-			}
-		}
-	}
-	return ""
-}
-
-func (g *GeoService) extractCC(record map[string]interface{}) string {
-	cc := ""
-
-	// Check for "country_code" first (common in IPInfo, IP2Location, etc.)
-	if c, ok := record["country_code"].(string); ok && len(c) == 2 {
-		cc = c
-	}
-
-	// Check for "country" next
-	if cc == "" {
-		if country, ok := record["country"].(map[string]interface{}); ok {
-			if iso, ok := country["iso_code"].(string); ok && len(iso) == 2 {
-				cc = iso
-			}
-		} else if c, ok := record["country"].(string); ok && len(c) == 2 {
-			cc = c
-		}
-	}
-
-	if cc == "" {
-		// If we still have nothing, let's see what was in there that we rejected
-		if c, ok := record["country_code"].(string); ok {
-			cc = c
-		} else if c, ok := record["country"].(string); ok {
-			cc = c
-		}
-	}
-
-	sanitized := g.SanitizeCC(cc)
-	if sanitized == "" && cc != "" {
-		return ""
-	}
-	return sanitized
-}
-
 func (g *GeoService) SanitizeCC(cc string) string {
 	// Filter out invalid or generic country codes
 	if strings.Contains(cc, "WORLD WIDE") || strings.Contains(cc, "ANYCAST") || strings.Contains(cc, "#") || len(cc) > 3 {
@@ -570,61 +672,7 @@ func (g *GeoService) SanitizeCC(cc string) string {
 	return cc
 }
 
-func (g *GeoService) extractCoords(record map[string]interface{}) (lat, lng float64, ok bool) {
-	// 1. Check MaxMind style: location -> latitude/longitude
-	if loc, ok := record["location"].(map[string]interface{}); ok {
-		lat, ok1 := g.asFloat(loc["latitude"])
-		if !ok1 {
-			lat, ok1 = g.asFloat(loc["lat"])
-		}
-		lng, ok2 := g.asFloat(loc["longitude"])
-		if !ok2 {
-			lng, ok2 = g.asFloat(loc["lng"])
-		}
-		if !ok2 {
-			lng, ok2 = g.asFloat(loc["long"])
-		}
-		if ok1 && ok2 {
-			return lat, lng, true
-		}
-	}
-
-	// 2. Check flat style (IPInfo and others)
-	lat, ok1 := g.asFloat(record["latitude"])
-	if !ok1 {
-		lat, ok1 = g.asFloat(record["lat"])
-	}
-	if !ok1 {
-		lat, ok1 = g.asFloat(record["Latitude"])
-	}
-
-	lng, ok2 := g.asFloat(record["longitude"])
-	if !ok2 {
-		lng, ok2 = g.asFloat(record["lng"])
-	}
-	if !ok2 {
-		lng, ok2 = g.asFloat(record["long"])
-	}
-	if !ok2 {
-		lng, ok2 = g.asFloat(record["Longitude"])
-	}
-
-	if ok1 && ok2 {
-		return lat, lng, true
-	}
-
-	// 3. Check IPInfo "loc" field: "lat,lng" string
-	if locStr, ok := record["loc"].(string); ok {
-		var lat, lng float64
-		if _, err := fmt.Sscanf(locStr, "%f,%f", &lat, &lng); err == nil {
-			return lat, lng, true
-		}
-	}
-
-	return 0, 0, false
-}
-
-func (g *GeoService) asFloat(v interface{}) (float64, bool) {
+func (g *GeoService) AsFloat(v interface{}) (float64, bool) {
 	switch val := v.(type) {
 	case float64:
 		return val, true
@@ -666,7 +714,9 @@ func (g *GeoService) resolveFromCountryHubs(ip uint32, countryCode string) (lat,
 	if countryCode == "" {
 		return 0, 0, ""
 	}
+	g.dataMu.RLock()
 	hubs := g.countryHubs[countryCode]
+	g.dataMu.RUnlock()
 	if len(hubs) > 0 {
 		h := utils.HashUint32(ip)
 		r := (float64(h) / float64(0xFFFFFFFF)) * hubs[len(hubs)-1].CumulativeWeight
@@ -696,6 +746,8 @@ type GeoResolver interface {
 }
 
 func (g *GeoService) ResolveCityToCoords(city, cc string) (lat, lng float64, countryCode string) {
+	g.dataMu.RLock()
+	defer g.dataMu.RUnlock()
 	if c, ok := g.cityCoords[cityKey{city: strings.ToLower(city), cc: strings.ToUpper(cc)}]; ok {
 		return float64(c[0]), float64(c[1]), cc
 	}

@@ -111,6 +111,34 @@ func (t *DiskTrie) BatchInsertUint32(entries map[uint32][]byte) error {
 	return wb.Flush()
 }
 
+func (t *DiskTrie) BatchInsertIPNets(entries []IPNetEntry) error {
+	if t == nil || t.db == nil {
+		return nil
+	}
+	wb := t.db.NewWriteBatch()
+	defer wb.Cancel()
+
+	for _, e := range entries {
+		ip := e.Net.IP.To4()
+		if ip == nil {
+			continue
+		}
+		ones, _ := e.Net.Mask.Size()
+		key := make([]byte, 5)
+		copy(key, ip)
+		key[4] = byte(ones)
+		if err := wb.Set(key, e.Value); err != nil {
+			return err
+		}
+	}
+	return wb.Flush()
+}
+
+type IPNetEntry struct {
+	Net   *net.IPNet
+	Value []byte
+}
+
 func (t *DiskTrie) BatchInsertRaw(entries map[string][]byte) error {
 	if t == nil || t.db == nil {
 		return nil
