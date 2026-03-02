@@ -3,6 +3,8 @@ package bgpengine
 import (
 	"image/color"
 	"testing"
+
+	"github.com/sudorandom/bgp-stream/pkg/geoservice"
 )
 
 func TestUpdateHierarchicalRates(t *testing.T) {
@@ -75,6 +77,11 @@ func TestGetPriority(t *testing.T) {
 
 func TestEngineOutageClearing(t *testing.T) {
 	e := NewEngine(1024, 768, 1.0)
+
+	// Update mock to match new signature
+	e.processor = NewBGPProcessor(func(ip uint32) (float64, float64, string, geoservice.ResolutionType) {
+		return e.geo.GetIPCoords(ip)
+	}, e.SeenDB, e.StateDB, e.asnMapping, e.prefixToIP, e.recordEvent)
 
 	prefix := "1.2.3.0/24"
 

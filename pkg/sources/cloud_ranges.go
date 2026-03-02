@@ -2,16 +2,14 @@
 package sources
 
 import (
-	"encoding/binary"
 	"encoding/csv"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
-	"log"
 	"net"
-	"net/http"
-	"sync"
+
+	"github.com/sudorandom/bgp-stream/pkg/utils"
 )
 
 type CloudPrefix struct {
@@ -187,6 +185,7 @@ func ParseOracleRanges(r io.Reader) ([]CloudPrefix, error) {
 
 func ParseDigitalOceanRanges(r io.Reader) ([]CloudPrefix, error) {
 	reader := csv.NewReader(r)
+	reader.FieldsPerRecord = -1 // Allow variable number of fields to avoid strict errors
 	var results []CloudPrefix
 	for {
 		record, err := reader.Read()
@@ -194,12 +193,13 @@ func ParseDigitalOceanRanges(r io.Reader) ([]CloudPrefix, error) {
 			break
 		}
 		if err != nil {
-			return nil, err
-		}
-		if len(record) < 3 {
+			// Skip malformed lines instead of failing entirely
 			continue
 		}
 		// Format: prefix,country,region,city,postal
+		if len(record) < 4 {
+			continue
+		}
 		prefix := record[0]
 		_, ipNet, err := net.ParseCIDR(prefix)
 		if err != nil {
@@ -350,18 +350,13 @@ var cloudRegionToCity = map[string]string{
 // FetchGoogleGeofeed downloads and parses the official Google Cloud geofeed.
 // Source: https://www.gstatic.com/ipranges/cloud_geofeed
 func FetchGoogleGeofeed() ([]CloudPrefix, error) {
-	const url = GoogleGeofeedURL
-	resp, err := http.Get(url)
+	r, err := utils.GetCachedReader(GoogleGeofeedURL, true, "[CLOUD-GCP]")
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log.Printf("Error closing Google geofeed response body: %v", err)
-		}
-	}()
+	defer func() { _ = r.Close() }()
 
-	entries, err := ParseGeofeed(resp.Body)
+	entries, err := ParseGeofeed(r)
 	if err != nil {
 		return nil, err
 	}
@@ -377,87 +372,55 @@ func FetchGoogleGeofeed() ([]CloudPrefix, error) {
 	return results, nil
 }
 
-type CloudTrie struct {
-	// maps per mask length (0 to 32)
-	// key is uint32 (IPv4)
-	masks [33]map[uint32]string
-	cache sync.Map
-}
-
-func NewCloudTrie(prefixes []CloudPrefix) *CloudTrie {
-	ct := &CloudTrie{}
-	for i := 0; i < 33; i++ {
-		ct.masks[i] = make(map[uint32]string)
+func GetCloudCityHint(p CloudPrefix) string {
+	// If city is already provided (e.g. from Geofeed), use it
+	if p.City != "" {
+		return p.City
 	}
 
-	for _, p := range prefixes {
-		ip := p.Prefix.IP.To4()
-		if ip == nil {
-			continue
-		}
-		ones, _ := p.Prefix.Mask.Size()
-
-		// If city is already provided (e.g. from Geofeed), use it
-		if p.City != "" {
-			ct.masks[ones][binary.BigEndian.Uint32(ip)] = p.City
-			continue
-		}
-
-		// For DigitalOcean, the region is already city|country
-		if p.Service == "DigitalOcean" {
-			ct.masks[ones][binary.BigEndian.Uint32(ip)] = p.Region
-			continue
-		}
-
-		if city, ok := cloudRegionToCity[p.Region]; ok {
-			ct.masks[ones][binary.BigEndian.Uint32(ip)] = city
-		}
-	}
-	return ct
-}
-
-func (ct *CloudTrie) Lookup(ip net.IP) (string, bool) {
-	target := ip.To4()
-	if target == nil {
-		return "", false
+	// For DigitalOcean, the region is already city|country
+	if p.Service == "DigitalOcean" {
+		return p.Region
 	}
 
-	targetInt := binary.BigEndian.Uint32(target)
-	if v, ok := ct.cache.Load(targetInt); ok {
-		if v == nil {
-			return "", false
-		}
-		return v.(string), true
+	if city, ok := cloudRegionToCity[p.Region]; ok {
+		return city
 	}
-
-	for maskLen := 32; maskLen >= 0; maskLen-- {
-		var mask uint32
-		if maskLen > 0 {
-			mask = uint32(0xFFFFFFFF) << (32 - maskLen)
-		} else {
-			mask = 0
-		}
-
-		prefixIP := targetInt & mask
-		if city, ok := ct.masks[maskLen][prefixIP]; ok {
-			ct.cache.Store(targetInt, city)
-			return city, true
-		}
-	}
-
-	ct.cache.Store(targetInt, nil)
-	return "", false
+	return ""
 }
 
 func FetchAWSRanges() ([]CloudPrefix, error) {
-	resp, err := http.Get(AWSRangesURL)
+	r, err := utils.GetCachedReader(AWSRangesURL, true, "[CLOUD-AWS]")
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log.Printf("Error closing AWS response body: %v", err)
-		}
-	}()
-	return ParseAWSRanges(resp.Body)
+	defer func() { _ = r.Close() }()
+	return ParseAWSRanges(r)
+}
+
+func FetchAzureRanges() ([]CloudPrefix, error) {
+	r, err := utils.GetCachedReader(AzureRangesURL, true, "[CLOUD-AZURE]")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = r.Close() }()
+	return ParseAzureRanges(r)
+}
+
+func FetchOracleRanges() ([]CloudPrefix, error) {
+	r, err := utils.GetCachedReader(OracleRangesURL, true, "[CLOUD-ORACLE]")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = r.Close() }()
+	return ParseOracleRanges(r)
+}
+
+func FetchDigitalOceanRanges() ([]CloudPrefix, error) {
+	r, err := utils.GetCachedReader(DigitalOceanURL, true, "[CLOUD-DO]")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = r.Close() }()
+	return ParseDigitalOceanRanges(r)
 }

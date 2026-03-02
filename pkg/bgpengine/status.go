@@ -681,6 +681,7 @@ func (e *Engine) drawTrendLayers(chartW, chartH, globalMaxLog float64) {
 func (e *Engine) StartMetricsLoop() {
 	ticker := time.NewTicker(1 * time.Second)
 	uiTicks := 0
+	logTicks := 0
 	lastUIUpdate := time.Now()
 	firstRun := true
 
@@ -696,6 +697,15 @@ func (e *Engine) StartMetricsLoop() {
 		e.lastMetricsUpdate = now
 
 		e.updateMetricSnapshots(interval)
+
+		logTicks++
+		if logTicks >= 60 {
+			logTicks = 0
+			e.geo.ReportGeoMetrics()
+			if e.processor != nil {
+				e.processor.ReportProcessorMetrics()
+			}
+		}
 
 		uiTicks++
 		targetTicks := 20
@@ -1003,14 +1013,14 @@ func (e *Engine) updatePrefixCounts(allImpact []*VisualImpact) {
 			}
 		}
 
-		if asn != 0 {
-			m, ok := e.asnsPerClass[vi.ClassificationName]
-			if !ok {
-				m = make(map[uint32]struct{})
-				e.asnsPerClass[vi.ClassificationName] = m
-			}
-			m[asn] = struct{}{}
+		// Track ASNs per classification. If ASN is unknown (0), we still track it as a unique
+		// entry to ensure ASNCount is at least 1 when Prefixes are present.
+		m, ok := e.asnsPerClass[vi.ClassificationName]
+		if !ok {
+			m = make(map[uint32]struct{})
+			e.asnsPerClass[vi.ClassificationName] = m
 		}
+		m[asn] = struct{}{}
 	}
 
 	e.prefixCounts = e.prefixCounts[:0]
@@ -1050,7 +1060,8 @@ func (e *Engine) activateVisualAnomalies(allImpact []*VisualImpact) {
 			continue
 		}
 
-		g, ok := e.asnGroups[asn]
+		key := asnGroupKey{ASN: asn, Anom: vi.ClassificationName}
+		g, ok := e.asnGroups[key]
 		if !ok {
 			networkName := ""
 			if e.asnMapping != nil {
@@ -1069,14 +1080,11 @@ func (e *Engine) activateVisualAnomalies(allImpact []*VisualImpact) {
 				maxCount: vi.Count,
 				prefixes: make([]string, 0, 4), // Small initial capacity
 			}
-			e.asnGroups[asn] = g
+			e.asnGroups[key] = g
 		}
 
-		// Keep track of the most severe anomaly for this ASN
-		if prio > g.priority || (prio == g.priority && vi.Count > g.maxCount) {
-			g.anom = vi.ClassificationName
-			g.color = e.getClassificationUIColor(vi.ClassificationName)
-			g.priority = prio
+		// Update max count if this prefix has a higher rate than others in this group
+		if vi.Count > g.maxCount {
 			g.maxCount = vi.Count
 		}
 

@@ -65,18 +65,42 @@ To ensure a smooth and meaningful visualization, the engine employs several tech
 ## Running Locally
 
 ### Prerequisites
-- [Go 1.24+](https://golang.org/dl/)
+- [Go 1.26+](https://golang.org/dl/)
 - [just](https://github.com/casey/just) (optional, but recommended)
 - [CGO Dependencies:](https://ebitengine.org/en/documents/install.html) Required for Ebiten (standard dev headers for ALSA/X11 on Linux, none on macOS/Windows).
 
+### Initial Data Setup
+Before running the viewer, you must download and process the required geolocation and ASN data:
+```bash
+# Fetch and process all required data (RIR, WHOIS, Cloud, PeeringDB)
+just fetch-data
+```
+This will create a `data/` directory with persistent indexes used by the engine.
+
 ### Development
 ```bash
-# Run the project directly
+# Run the visualizer
 just run
+
+# Re-fetch data if it becomes stale (re-downloads even if cached)
+go run ./cmd/bgp-data-fetcher -fresh
 
 # Run tests
 just test
 ```
+
+## Command-Line Options
+
+### bgp-viewer
+- `-width`: Internal rendering width (default: 1920)
+- `-height`: Internal rendering height (default: 1080)
+- `-scale`: Internal rendering scale (default: 380.0)
+- `-capture-interval`: Interval to save high-quality PNG frames (e.g. `1h`, `24h`)
+- `-capture-dir`: Directory to store captures (default: `archive`)
+- `-minimal-ui`: Start with a cleaner UI (map only)
+
+### bgp-data-fetcher
+- `-fresh`: Re-download all source files even if they are already cached. Useful for ensuring the latest RIR/WHOIS data.
 
 ## Environment Variables
 

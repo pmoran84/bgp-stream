@@ -2,15 +2,71 @@
 package utils
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/bits"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// IPToUint32 converts a net.IP to uint32.
+func IPToUint32(ip net.IP) uint32 {
+	ip = ip.To4()
+	if ip == nil {
+		return 0
+	}
+	return binary.BigEndian.Uint32(ip)
+}
+
+// RangeToCIDRs converts an IPv4 range [start, end] into a slice of *net.IPNet.
+func RangeToCIDRs(start, end uint32) []*net.IPNet {
+	var cidrs []*net.IPNet
+	for start <= end {
+		maxLen := 32 - bits.TrailingZeros32(start)
+		if start == 0 {
+			maxLen = 0
+		}
+		curLen := 32 - bits.Len32(end-start+1) + 1
+		if maxLen < curLen {
+			maxLen = curLen
+		}
+
+		ip := make(net.IP, 4)
+		binary.BigEndian.PutUint32(ip, start)
+		cidrs = append(cidrs, &net.IPNet{
+			IP:   ip,
+			Mask: net.CIDRMask(maxLen, 32),
+		})
+
+		// Move start to next block
+		move := uint32(1) << (32 - uint32(maxLen))
+		if move == 0 { // /0 block (entire space)
+			break
+		}
+
+		newStart := start + move
+		if newStart < start || newStart > end { // overflow or past end
+			break
+		}
+		start = newStart
+	}
+	return cidrs
+}
+
+// HashUint32 returns a simple hash of a uint32, useful for deterministic mapping.
+func HashUint32(x uint32) uint32 {
+	x = ((x >> 16) ^ x) * 0x45d9f3b
+	x = ((x >> 16) ^ x) * 0x45d9f3b
+	x = (x >> 16) ^ x
+	return x
+}
 
 var ErrNotFound = errors.New("file not found on server")
 
@@ -33,13 +89,36 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 
 // DownloadFile downloads a file from a URL to a local path safely.
 func DownloadFile(url, path string) error {
-	resp, err := http.Get(url)
-	if err != nil {
-		return err
+	client := &http.Client{}
+	maxRetries := 2
+	var resp *http.Response
+	var err error
+
+	for i := 0; i < maxRetries; i++ {
+		req, err := http.NewRequest("GET", url, http.NoBody)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("User-Agent", "bgp-stream/1.0")
+
+		resp, err = client.Do(req)
+		if err != nil {
+			return err
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			_ = resp.Body.Close()
+			log.Printf("Rate limited (429) for %s. Retrying in 5s...", url)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		break
 	}
 	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log.Printf("Error closing response body: %v", err)
+		if resp != nil && resp.Body != nil {
+			if err := resp.Body.Close(); err != nil {
+				log.Printf("Error closing response body: %v", err)
+			}
 		}
 	}()
 
@@ -77,7 +156,14 @@ func DownloadFile(url, path string) error {
 
 // Exists checks if a URL exists using a HEAD request.
 func Exists(url string) bool {
-	resp, err := http.Head(url)
+	client := &http.Client{}
+	req, err := http.NewRequest("HEAD", url, http.NoBody)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", "bgp-stream/1.0")
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
@@ -141,10 +227,33 @@ func GetCachedReader(url string, useCache bool, logPrefix string) (io.ReadCloser
 	}
 
 	log.Printf("%s Streaming from %s", logPrefix, url)
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
+	client := &http.Client{}
+	maxRetries := 2
+	var resp *http.Response
+
+	for i := 0; i < maxRetries; i++ {
+		var err error
+		req, err := http.NewRequest("GET", url, http.NoBody)
+
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "bgp-stream/1.0")
+
+		resp, err = client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			_ = resp.Body.Close()
+			log.Printf("%s Rate limited (429) for %s. Retrying in 5s...", logPrefix, url)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		break
 	}
+
 	if resp.StatusCode != http.StatusOK {
 		if err := resp.Body.Close(); err != nil {
 			log.Printf("Error closing response body: %v", err)

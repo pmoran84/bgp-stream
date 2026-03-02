@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/biter777/countries v1.7.5
+	github.com/cloudflare/ahocorasick v0.0.0-20240916140611-054963ec9396
 	github.com/dgraph-io/badger/v4 v4.9.1
 	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
 	github.com/gorilla/websocket v1.5.3

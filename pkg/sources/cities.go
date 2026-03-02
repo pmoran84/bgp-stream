@@ -3,7 +3,6 @@ package sources
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 
 	"github.com/sudorandom/bgp-stream/pkg/utils"
 )
@@ -19,31 +18,28 @@ type CityDominance struct {
 }
 
 func FetchCityDominance() ([]CityDominance, error) {
-	resp, err := http.Get(CityDominanceMetaURL)
+	metaReader, err := utils.GetCachedReader(CityDominanceMetaURL, true, "[GEO-HUB-META]")
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
+	defer func() { _ = metaReader.Close() }()
 
 	var meta struct {
 		MaxYear int `json:"max_year"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&meta); err != nil {
+	if err := json.NewDecoder(metaReader).Decode(&meta); err != nil {
 		return nil, err
 	}
 
-	resp2, err := http.Get(fmt.Sprintf(CityDominanceDataURL, meta.MaxYear))
+	url := fmt.Sprintf(CityDominanceDataURL, meta.MaxYear)
+	dataReader, err := utils.GetCachedReader(url, true, "[GEO-HUB-DATA]")
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		_ = resp2.Body.Close()
-	}()
+	defer func() { _ = dataReader.Close() }()
 
 	var cities []CityDominance
-	if err := json.NewDecoder(resp2.Body).Decode(&cities); err != nil {
+	if err := json.NewDecoder(dataReader).Decode(&cities); err != nil {
 		return nil, err
 	}
 

@@ -9,7 +9,7 @@ before:
 
 builds:
   - id: bgp-viewer-amd64
-    main: ./cmd/bgp-viewer/main.go
+    main: ./cmd/bgp-viewer
     binary: bgp-viewer
     env:
       - CGO_ENABLED=1
@@ -21,7 +21,7 @@ builds:
       - -tags=ebitengine
 
   - id: bgp-viewer-arm64
-    main: ./cmd/bgp-viewer/main.go
+    main: ./cmd/bgp-viewer
     binary: bgp-viewer
     env:
       - CGO_ENABLED=1
@@ -34,6 +34,26 @@ builds:
       - arm64
     flags:
       - -tags=ebitengine
+
+  - id: bgp-data-fetcher-amd64
+    main: ./cmd/bgp-data-fetcher
+    binary: bgp-data-fetcher
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+
+  - id: bgp-data-fetcher-arm64
+    main: ./cmd/bgp-data-fetcher
+    binary: bgp-data-fetcher
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - arm64
 
 archives:
   - formats: ["tar.gz"]

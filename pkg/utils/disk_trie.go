@@ -15,10 +15,29 @@ type DiskTrie struct {
 	cache sync.Map
 }
 
-func OpenDiskTrie(path string) (*DiskTrie, error) {
+func getBadgerOptions(path string) badger.Options {
 	opts := badger.DefaultOptions(path)
-	// Decrease logging verbosity
 	opts.Logger = nil
+
+	// Aggressive caching options for v4
+	opts.IndexCacheSize = 256 << 20 // 256MB index cache
+	opts.BlockCacheSize = 512 << 20 // 512MB block cache
+
+	return opts
+}
+
+func OpenDiskTrie(path string) (*DiskTrie, error) {
+	opts := getBadgerOptions(path)
+	db, err := badger.Open(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &DiskTrie{db: db}, nil
+}
+
+func OpenDiskTrieReadOnly(path string) (*DiskTrie, error) {
+	opts := getBadgerOptions(path)
+	opts.ReadOnly = true
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, err
@@ -48,6 +67,9 @@ func (t *DiskTrie) Insert(ipNet *net.IPNet, value []byte) error {
 }
 
 func (t *DiskTrie) BatchInsert(entries map[string][]byte) error {
+	if t == nil || t.db == nil {
+		return nil
+	}
 	wb := t.db.NewWriteBatch()
 	defer wb.Cancel()
 
@@ -71,7 +93,28 @@ func (t *DiskTrie) BatchInsert(entries map[string][]byte) error {
 	return wb.Flush()
 }
 
+func (t *DiskTrie) BatchInsertUint32(entries map[uint32][]byte) error {
+	if t == nil || t.db == nil {
+		return nil
+	}
+	wb := t.db.NewWriteBatch()
+	defer wb.Cancel()
+
+	for ip, v := range entries {
+		key := make([]byte, 5)
+		binary.BigEndian.PutUint32(key, ip)
+		key[4] = 32
+		if err := wb.Set(key, v); err != nil {
+			return err
+		}
+	}
+	return wb.Flush()
+}
+
 func (t *DiskTrie) BatchInsertRaw(entries map[string][]byte) error {
+	if t == nil || t.db == nil {
+		return nil
+	}
 	wb := t.db.NewWriteBatch()
 	defer wb.Cancel()
 
@@ -157,6 +200,51 @@ func (t *DiskTrie) Lookup(ip net.IP) (val []byte, maskLen int, err error) {
 	return foundVal, foundMask, err
 }
 
+func (t *DiskTrie) LookupUint32(ip uint32) (val []byte, maskLen int, err error) {
+	if v, ok := t.cache.Load(ip); ok {
+		if v == nil {
+			return nil, 0, nil
+		}
+		res := v.(lookupResult)
+		return res.val, res.maskLen, nil
+	}
+
+	var foundVal []byte
+	var foundMask int
+	err = t.db.View(func(txn *badger.Txn) error {
+		key := make([]byte, 5)
+		for m := 32; m >= 0; m-- {
+			var mask uint32
+			if m > 0 {
+				mask = uint32(0xFFFFFFFF) << (32 - m)
+			} else {
+				mask = 0
+			}
+
+			prefixIP := ip & mask
+			binary.BigEndian.PutUint32(key, prefixIP)
+			key[4] = byte(m)
+
+			item, getErr := txn.Get(key)
+			if getErr == nil {
+				foundVal, getErr = item.ValueCopy(nil)
+				foundMask = m
+				return getErr
+			}
+		}
+		return nil
+	})
+
+	if err == nil {
+		if foundVal == nil {
+			t.cache.Store(ip, nil)
+		} else {
+			t.cache.Store(ip, lookupResult{val: foundVal, maskLen: foundMask})
+		}
+	}
+	return foundVal, foundMask, err
+}
+
 func (t *DiskTrie) DeleteRaw(key []byte) error {
 	return t.db.Update(func(txn *badger.Txn) error {
 		return txn.Delete(key)
@@ -164,6 +252,9 @@ func (t *DiskTrie) DeleteRaw(key []byte) error {
 }
 
 func (t *DiskTrie) ForEach(fn func(k []byte, v []byte) error) error {
+	if t == nil || t.db == nil {
+		return nil
+	}
 	return t.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = true
@@ -181,4 +272,31 @@ func (t *DiskTrie) ForEach(fn func(k []byte, v []byte) error) error {
 		}
 		return nil
 	})
+}
+
+func (t *DiskTrie) IsEmpty() bool {
+	if t == nil || t.db == nil {
+		return true
+	}
+	empty := true
+	err := t.db.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		it.Rewind()
+		if it.Valid() {
+			empty = false
+		}
+		return nil
+	})
+	if err != nil {
+		return true
+	}
+	return empty
+}
+
+func (t *DiskTrie) Clear() error {
+	if t == nil || t.db == nil {
+		return nil
+	}
+	return t.db.DropAll()
 }

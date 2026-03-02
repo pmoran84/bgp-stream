@@ -3,6 +3,8 @@ package bgpengine
 import (
 	"testing"
 	"time"
+
+	"github.com/sudorandom/bgp-stream/pkg/geoservice"
 )
 
 func TestBGPProcessorDeduplication(t *testing.T) {
@@ -10,9 +12,8 @@ func TestBGPProcessorDeduplication(t *testing.T) {
 	onEvent := func(lat, lng float64, cc string, eventType EventType, level2Type Level2EventType, prefix string, asn uint32) {
 		events++
 	}
-
-	geo := func(ip uint32) (float64, float64, string) {
-		return 37.0, -122.0, "US"
+	geo := func(ip uint32) (float64, float64, string, geoservice.ResolutionType) {
+		return 37.0, -122.0, "US", geoservice.ResGeoIP
 	}
 
 	prefixToIP := func(p string) uint32 {

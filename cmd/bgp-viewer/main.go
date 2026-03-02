@@ -13,9 +13,9 @@ import (
 )
 
 var (
-	renderWidth        = flag.Int("width", 1920, "Internal rendering width")
-	renderHeight       = flag.Int("height", 1080, "Internal rendering height")
-	renderScale        = flag.Float64("scale", 380.0, "Internal rendering scale")
+	renderWidth        = flag.Int("width", 3840, "Internal rendering width")
+	renderHeight       = flag.Int("height", 2160, "Internal rendering height")
+	renderScale        = flag.Float64("scale", 760.0, "Internal rendering scale")
 	windowWidth        = flag.Int("window-width", 0, "Initial window width (defaults to render width)")
 	windowHeight       = flag.Int("window-height", 0, "Initial window height (defaults to render height)")
 	tpsFlag            = flag.Int("tps", 30, "Ticks per second (engine updates)")
@@ -33,6 +33,7 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
 	engine := initEngine()
+
 	startBackgroundTasks(engine)
 	setupSignalHandler(engine)
 	runWindowLoop(engine)
@@ -96,12 +97,7 @@ func setupSignalHandler(engine *bgpengine.Engine) {
 }
 
 func closeEngineResources(engine *bgpengine.Engine) {
-	if ap := engine.GetAudioPlayer(); ap != nil {
-		ap.Shutdown()
-	}
-	if proc := engine.GetProcessor(); proc != nil {
-		proc.Close()
-	}
+	engine.Stop()
 	if engine.SeenDB != nil {
 		if err := engine.SeenDB.Close(); err != nil {
 			log.Printf("Error closing SeenDB: %v", err)

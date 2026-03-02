@@ -11,12 +11,13 @@ import (
 
 	"github.com/gorilla/websocket"
 	bgpproto "github.com/sudorandom/bgp-stream/pkg/bgpengine/proto/v1"
+	"github.com/sudorandom/bgp-stream/pkg/geoservice"
 	"github.com/sudorandom/bgp-stream/pkg/utils"
 	"google.golang.org/protobuf/proto"
 )
 
 type BGPEventCallback func(lat, lng float64, cc string, eventType EventType, level2Type Level2EventType, prefix string, asn uint32)
-type IPCoordsProvider func(ip uint32) (float64, float64, string)
+type IPCoordsProvider func(ip uint32) (float64, float64, string, geoservice.ResolutionType)
 type PrefixToIPConverter func(p string) uint32
 
 type Level2EventType int
@@ -84,6 +85,7 @@ type MessageContext struct {
 	Aggregator   string
 	PathLen      int
 	Peer         string
+	Host         string
 	OriginASN    uint32
 	Med          int32
 	LocalPref    int32
@@ -107,6 +109,7 @@ type RISMessageData struct {
 	Community   [][]interface{}   `json:"community"`
 	Aggregator  string            `json:"aggregator"`
 	Peer        string            `json:"peer"`
+	Host        string            `json:"host"`
 	Med         int32             `json:"med"`
 	LocalPref   int32             `json:"local_pref"`
 }
@@ -134,6 +137,9 @@ type BGPProcessor struct {
 	mu       sync.Mutex
 	url      string
 	stopping atomic.Bool
+
+	RecentlySeenResets atomic.Uint64
+	PrefixStateResets  atomic.Uint64
 }
 
 func NewBGPProcessor(geo IPCoordsProvider, seenDB, stateDB *utils.DiskTrie, asnMapping *utils.ASNMapping, prefixToIP PrefixToIPConverter, onEvent BGPEventCallback) *BGPProcessor {
@@ -151,8 +157,8 @@ func NewBGPProcessor(geo IPCoordsProvider, seenDB, stateDB *utils.DiskTrie, asnM
 		level2Stats:          make(map[Level2EventType]int),
 		level2UniquePrefixes: make(map[Level2EventType]map[string]struct{}),
 		prefixStates:         make(map[string]*bgpproto.PrefixState),
-		stateWriteQueue:      make(chan map[string]*bgpproto.PrefixState, 100),
-		stateDeleteQueue:     make(chan string, 1000),
+		stateWriteQueue:      make(chan map[string]*bgpproto.PrefixState, 200),
+		stateDeleteQueue:     make(chan string, 2000),
 		url:                  "wss://ris-live.ripe.net/v1/ws/?client=github.com/sudorandom/bgp-stream",
 	}
 
@@ -255,6 +261,14 @@ func (p *BGPProcessor) connectAndSubscribe() (*websocket.Conn, error) {
 	return c, nil
 }
 
+type pendingEvent struct {
+	ip         uint32
+	prefix     string
+	asn        uint32
+	eventType  EventType
+	level2Type Level2EventType
+}
+
 func (p *BGPProcessor) runMessageLoop(c *websocket.Conn, pendingWithdrawals map[uint32]struct {
 	Time   time.Time
 	Prefix string
@@ -281,7 +295,12 @@ func (p *BGPProcessor) runMessageLoop(c *websocket.Conn, pendingWithdrawals map[
 			continue
 		}
 		if msg.Type == "ris_message" {
-			p.handleRISMessage(&msg.Data, pendingWithdrawals)
+			events := p.handleRISMessage(&msg.Data, pendingWithdrawals)
+			for _, e := range events {
+				if lat, lng, cc, _ := p.geo(e.ip); cc != "" {
+					p.onEvent(lat, lng, cc, e.eventType, e.level2Type, e.prefix, e.asn)
+				}
+			}
 		}
 	}
 }
@@ -300,12 +319,14 @@ func (p *BGPProcessor) startWithdrawalPacer(pendingWithdrawals map[uint32]struct
 
 			for ip, entry := range pendingWithdrawals {
 				if now.After(entry.Time) {
-					if lat, lng, cc := p.geo(ip); cc != "" {
+					if lat, lng, cc, resType := p.geo(ip); cc != "" {
 						p.onEvent(lat, lng, cc, EventWithdrawal, Level2None, entry.Prefix, 0)
 						p.recentlySeen[ip] = struct {
 							Time time.Time
 							Type EventType
 						}{Time: now, Type: EventWithdrawal}
+					} else {
+						log.Printf("[GEO-DEBUG] Unknown prefix (withdrawal): %s, Resolution: %s", entry.Prefix, resType)
 					}
 					delete(pendingWithdrawals, ip)
 				}
@@ -315,7 +336,7 @@ func (p *BGPProcessor) startWithdrawalPacer(pendingWithdrawals map[uint32]struct
 			var batch map[string]*bgpproto.PrefixState
 			if ticks >= 30 {
 				ticks = 0
-				batch = p.cleanupRecentlySeen(now)
+				batch = p.cleanupRecentlySeen()
 			}
 			p.mu.Unlock()
 
@@ -326,32 +347,48 @@ func (p *BGPProcessor) startWithdrawalPacer(pendingWithdrawals map[uint32]struct
 	}()
 }
 
-func (p *BGPProcessor) cleanupRecentlySeen(now time.Time) map[string]*bgpproto.PrefixState {
-	if len(p.recentlySeen) > 500000 {
-		for ip, entry := range p.recentlySeen {
-			if now.Sub(entry.Time) > 5*time.Minute {
-				delete(p.recentlySeen, ip)
-			}
-		}
+func (p *BGPProcessor) cleanupRecentlySeen() map[string]*bgpproto.PrefixState {
+	if len(p.recentlySeen) > 1000000 {
+		p.RecentlySeenResets.Add(1)
+		p.recentlySeen = make(map[uint32]struct {
+			Time time.Time
+			Type EventType
+		})
 	}
 
 	batch := make(map[string]*bgpproto.PrefixState)
-	for prefix, state := range p.prefixStates {
-		if now.Sub(time.Unix(state.LastUpdateTs, 0)) > 5*time.Minute {
-			if p.stateDB != nil && !p.isStopping() {
-				batch[prefix] = state
-			}
-			delete(p.prefixStates, prefix)
-		}
+	if len(p.prefixStates) > 500000 {
+		p.PrefixStateResets.Add(1)
+		p.prefixStates = make(map[string]*bgpproto.PrefixState)
 	}
 
 	return batch
 }
 
+func (p *BGPProcessor) ReportProcessorMetrics() {
+	seenResets := p.RecentlySeenResets.Swap(0)
+	stateResets := p.PrefixStateResets.Swap(0)
+
+	if seenResets > 0 || stateResets > 0 {
+		var sb strings.Builder
+		sb.WriteString("[PROC-STATS]")
+		if seenResets > 0 {
+			fmt.Fprintf(&sb, " SeenResets: %d", seenResets)
+		}
+		if stateResets > 0 {
+			if seenResets > 0 {
+				sb.WriteString(",")
+			}
+			fmt.Fprintf(&sb, " StateResets: %d", stateResets)
+		}
+		log.Println(sb.String())
+	}
+}
+
 func (p *BGPProcessor) handleRISMessage(data *RISMessageData, pendingWithdrawals map[uint32]struct {
 	Time   time.Time
 	Prefix string
-}) {
+}) []pendingEvent {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -364,13 +401,15 @@ func (p *BGPProcessor) handleRISMessage(data *RISMessageData, pendingWithdrawals
 		}
 	}
 
+	var events []pendingEvent
 	now := time.Now()
-	p.handleWithdrawals(data.Withdrawals, originASN, now, pendingWithdrawals)
-	p.handleAnnouncements(data.Announcements, originASN, now, pendingWithdrawals)
+	events = append(events, p.handleWithdrawals(data.Withdrawals, originASN, now, pendingWithdrawals)...)
+	events = append(events, p.handleAnnouncements(data.Announcements, originASN, now, pendingWithdrawals)...)
 
 	ctx := &MessageContext{
 		Peer:       data.Peer,
 		Aggregator: data.Aggregator,
+		Host:       data.Host,
 		OriginASN:  originASN,
 		Med:        data.Med,
 		LocalPref:  data.LocalPref,
@@ -392,7 +431,9 @@ func (p *BGPProcessor) handleRISMessage(data *RISMessageData, pendingWithdrawals
 		ctx.IsWithdrawal = true
 		ctx.NumPrefixes = len(data.Withdrawals)
 		for _, prefix := range data.Withdrawals {
-			p.classifyEvent(prefix, ctx)
+			if e, ok := p.classifyEvent(prefix, ctx); ok {
+				events = append(events, e)
+			}
 		}
 	}
 
@@ -401,15 +442,19 @@ func (p *BGPProcessor) handleRISMessage(data *RISMessageData, pendingWithdrawals
 		ctx.NumPrefixes = len(ann.Prefixes)
 		ctx.NextHop = ann.NextHop
 		for _, prefix := range ann.Prefixes {
-			p.classifyEvent(prefix, ctx)
+			if e, ok := p.classifyEvent(prefix, ctx); ok {
+				events = append(events, e)
+			}
 		}
 	}
+	return events
 }
 
 func (p *BGPProcessor) handleWithdrawals(withdrawals []string, originASN uint32, now time.Time, pendingWithdrawals map[uint32]struct {
 	Time   time.Time
 	Prefix string
-}) {
+}) []pendingEvent {
+	var events []pendingEvent
 	for _, prefix := range withdrawals {
 		ip := p.prefixToIP(prefix)
 		if ip == 0 {
@@ -417,9 +462,7 @@ func (p *BGPProcessor) handleWithdrawals(withdrawals []string, originASN uint32,
 		}
 
 		if last, ok := p.recentlySeen[ip]; ok && now.Sub(last.Time) < dedupeWindow && last.Type == EventWithdrawal {
-			if lat, lng, cc := p.geo(ip); cc != "" {
-				p.onEvent(lat, lng, cc, EventGossip, Level2None, prefix, originASN)
-			}
+			events = append(events, pendingEvent{ip: ip, prefix: prefix, asn: originASN, eventType: EventGossip, level2Type: Level2None})
 			continue
 		}
 
@@ -428,6 +471,7 @@ func (p *BGPProcessor) handleWithdrawals(withdrawals []string, originASN uint32,
 			Prefix string
 		}{Time: now.Add(withdrawResolutionWindow), Prefix: prefix}
 	}
+	return events
 }
 
 func (p *BGPProcessor) handleAnnouncements(announcements []struct {
@@ -436,56 +480,52 @@ func (p *BGPProcessor) handleAnnouncements(announcements []struct {
 }, originASN uint32, now time.Time, pendingWithdrawals map[uint32]struct {
 	Time   time.Time
 	Prefix string
-}) {
+}) []pendingEvent {
+	var events []pendingEvent
 	for _, ann := range announcements {
 		for _, prefix := range ann.Prefixes {
-			p.processAnnouncement(prefix, originASN, now, pendingWithdrawals)
+			if e, ok := p.processAnnouncement(prefix, originASN, now, pendingWithdrawals); ok {
+				events = append(events, e)
+			}
 		}
 	}
+	return events
 }
 
 func (p *BGPProcessor) processAnnouncement(prefix string, originASN uint32, now time.Time, pendingWithdrawals map[uint32]struct {
 	Time   time.Time
 	Prefix string
-}) {
+}) (pendingEvent, bool) {
 	ip := p.prefixToIP(prefix)
 	if ip == 0 {
-		return
+		return pendingEvent{}, false
 	}
 
 	if last, ok := p.recentlySeen[ip]; ok && now.Sub(last.Time) < dedupeWindow && last.Type == EventWithdrawal {
-		if lat, lng, cc := p.geo(ip); cc != "" {
-			p.onEvent(lat, lng, cc, EventUpdate, Level2None, prefix, originASN)
-			p.recentlySeen[ip] = struct {
-				Time time.Time
-				Type EventType
-			}{Time: now, Type: EventUpdate}
-		}
-		return
+		p.recentlySeen[ip] = struct {
+			Time time.Time
+			Type EventType
+		}{Time: now, Type: EventUpdate}
+		return pendingEvent{ip: ip, prefix: prefix, asn: originASN, eventType: EventUpdate, level2Type: Level2None}, true
 	}
 
 	if last, ok := p.recentlySeen[ip]; ok && now.Sub(last.Time) < dedupeWindow && (last.Type == EventNew || last.Type == EventUpdate || last.Type == EventGossip) {
-		if lat, lng, cc := p.geo(ip); cc != "" {
-			p.onEvent(lat, lng, cc, EventGossip, Level2None, prefix, originASN)
-		}
-		return
+		return pendingEvent{ip: ip, prefix: prefix, asn: originASN, eventType: EventGossip, level2Type: Level2None}, true
 	}
 
 	if _, ok := pendingWithdrawals[ip]; ok {
 		delete(pendingWithdrawals, ip)
-		if lat, lng, cc := p.geo(ip); cc != "" {
-			p.onEvent(lat, lng, cc, EventUpdate, Level2None, prefix, originASN)
-			p.recentlySeen[ip] = struct {
-				Time time.Time
-				Type EventType
-			}{Time: now, Type: EventUpdate}
-		}
-	} else {
-		p.handleNewOrUpdate(prefix, ip, originASN, now)
+		p.recentlySeen[ip] = struct {
+			Time time.Time
+			Type EventType
+		}{Time: now, Type: EventUpdate}
+		return pendingEvent{ip: ip, prefix: prefix, asn: originASN, eventType: EventUpdate, level2Type: Level2None}, true
 	}
+
+	return p.handleNewOrUpdate(prefix, ip, originASN, now)
 }
 
-func (p *BGPProcessor) handleNewOrUpdate(prefix string, ip, originASN uint32, now time.Time) {
+func (p *BGPProcessor) handleNewOrUpdate(prefix string, ip, originASN uint32, now time.Time) (pendingEvent, bool) {
 	isNew := true
 	if p.seenDB != nil {
 		if val, _ := p.seenDB.Get(prefix); val != nil {
@@ -493,28 +533,22 @@ func (p *BGPProcessor) handleNewOrUpdate(prefix string, ip, originASN uint32, no
 		}
 	}
 
+	eventType := EventUpdate
 	if isNew {
-		if lat, lng, cc := p.geo(ip); cc != "" {
-			p.onEvent(lat, lng, cc, EventNew, Level2None, prefix, originASN)
-			p.recentlySeen[ip] = struct {
-				Time time.Time
-				Type EventType
-			}{Time: now, Type: EventNew}
-		}
-	} else {
-		if lat, lng, cc := p.geo(ip); cc != "" {
-			p.onEvent(lat, lng, cc, EventUpdate, Level2None, prefix, originASN)
-			p.recentlySeen[ip] = struct {
-				Time time.Time
-				Type EventType
-			}{Time: now, Type: EventUpdate}
-		}
+		eventType = EventNew
 	}
+
+	p.recentlySeen[ip] = struct {
+		Time time.Time
+		Type EventType
+	}{Time: now, Type: eventType}
+
+	return pendingEvent{ip: ip, prefix: prefix, asn: originASN, eventType: eventType, level2Type: Level2None}, true
 }
 
-func (p *BGPProcessor) classifyEvent(prefix string, ctx *MessageContext) {
+func (p *BGPProcessor) classifyEvent(prefix string, ctx *MessageContext) (pendingEvent, bool) {
 	if strings.Contains(prefix, ":") {
-		return
+		return pendingEvent{}, false
 	}
 	state, ok := p.prefixStates[prefix]
 	if !ok {
@@ -556,15 +590,22 @@ func (p *BGPProcessor) classifyEvent(prefix string, ctx *MessageContext) {
 			state.ClassifiedType = 0
 			state.ClassifiedTimeTs = 0
 			state.UncategorizedCounted = false
-		} else {
-			if lat, lng, cc := p.geo(p.prefixToIP(prefix)); cc != "" {
-				p.onEvent(lat, lng, cc, ctx.EventType(), Level2EventType(state.ClassifiedType), prefix, ctx.OriginASN)
-			}
-			return
+		} else if Level2EventType(state.ClassifiedType) != Level2Discovery &&
+			Level2EventType(state.ClassifiedType) != Level2PolicyChurn &&
+			Level2EventType(state.ClassifiedType) != Level2PathHunting &&
+			Level2EventType(state.ClassifiedType) != Level2PathLengthOscillation {
+			// If it's a Normal anomaly, we still allow upgrade to Bad/Critical
+			return pendingEvent{
+				ip:         p.prefixToIP(prefix),
+				prefix:     prefix,
+				asn:        ctx.OriginASN,
+				eventType:  ctx.EventType(),
+				level2Type: Level2EventType(state.ClassifiedType),
+			}, true
 		}
 	}
 
-	p.evaluatePrefixState(prefix, state, ctx)
+	return p.evaluatePrefixState(prefix, state, ctx)
 }
 
 func (p *BGPProcessor) getOrCreateBucket(state *bgpproto.PrefixState, now time.Time) *bgpproto.StatsBucket {
@@ -648,7 +689,7 @@ type prefixStats struct {
 	uniqueASNs                               map[uint32]bool
 }
 
-func (p *BGPProcessor) evaluatePrefixState(prefix string, state *bgpproto.PrefixState, ctx *MessageContext) {
+func (p *BGPProcessor) evaluatePrefixState(prefix string, state *bgpproto.PrefixState, ctx *MessageContext) (pendingEvent, bool) {
 	stats := p.aggregateRecentBuckets(state, ctx.Now)
 
 	elapsed := float64(ctx.Now.Unix() - stats.earliestTS)
@@ -661,13 +702,40 @@ func (p *BGPProcessor) evaluatePrefixState(prefix string, state *bgpproto.Prefix
 
 	// Ensure we have seen enough messages over a small time window to classify
 	if elapsed < 120 && stats.totalMsgs < 5 {
-		return
+		return pendingEvent{}, false
 	}
 
 	eventType, classified := p.findClassification(prefix, state, stats, elapsed, ctx)
 
 	if classified {
-		p.recordClassification(prefix, state, eventType, ctx.Now.Unix())
+		if state.ClassifiedType != 0 {
+			if p.getPriority(eventType) <= p.getPriority(Level2EventType(state.ClassifiedType)) {
+				// We already have a classification of equal or higher priority
+				// Just return the event for the current classification
+				return pendingEvent{
+					ip:         p.prefixToIP(prefix),
+					prefix:     prefix,
+					asn:        ctx.OriginASN,
+					eventType:  ctx.EventType(),
+					level2Type: Level2EventType(state.ClassifiedType),
+				}, true
+			}
+		}
+		return p.recordClassification(prefix, state, eventType, ctx.Now.Unix()), true
+	}
+	return pendingEvent{}, false
+}
+
+func (p *BGPProcessor) getPriority(t Level2EventType) int {
+	switch t {
+	case Level2RouteLeak, Level2Outage:
+		return 3 // Critical
+	case Level2LinkFlap, Level2Babbling, Level2NextHopOscillation, Level2AggFlap:
+		return 2 // Bad
+	case Level2PolicyChurn, Level2PathLengthOscillation, Level2PathHunting:
+		return 1 // Normal
+	default:
+		return 0 // Discovery
 	}
 }
 
@@ -678,7 +746,7 @@ func (p *BGPProcessor) aggregateRecentBuckets(state *bgpproto.PrefixState, now t
 		}
 	}
 
-	cutoff := now.Add(-5 * time.Minute).Unix()
+	cutoff := now.Add(-10 * time.Minute).Unix()
 	s := prefixStats{
 		earliestTS: now.Unix(),
 		uniqueHops: make(map[string]bool),
@@ -752,31 +820,42 @@ func (p *BGPProcessor) findCriticalAnomaly(prefix string, s prefixStats, elapsed
 }
 
 func (p *BGPProcessor) findBadAnomaly(s prefixStats, elapsed, perPeerRate float64) (Level2EventType, bool) {
-	if s.totalAgg > 10 && float64(s.totalAgg)/elapsed > 0.05 {
+	isAggFlap := s.totalAgg > 5 && float64(s.totalAgg)/elapsed > 0.02
+	isNextHopOsc := len(s.uniqueHops) > 1 && s.totalHop >= 3 && s.totalPath <= 1
+	isLinkFlap := s.totalWith > 3 && float64(s.totalAnn)/float64(s.totalWith) < 3.0
+
+	if isAggFlap {
 		return Level2AggFlap, true
 	}
-	if len(s.uniqueHops) > 1 && s.totalHop >= 5 && s.totalPath <= 1 {
+	if isNextHopOsc {
 		return Level2NextHopOscillation, true
 	}
-	if s.totalWith > 5 && float64(s.totalAnn)/float64(s.totalWith) < 2.5 {
+	if isLinkFlap {
 		return Level2LinkFlap, true
 	}
-	if (perPeerRate >= 5.0 && s.totalMsgs >= 10) || (perPeerRate >= 2.0 && s.totalMsgs >= 20 && s.totalPath == 0 && s.totalComm == 0 && s.totalMed == 0 && s.totalLP == 0) {
+
+	// Babbling is the catch-all for "Bad" high volume activity
+	if perPeerRate >= 1.5 && s.totalMsgs >= 10 && s.totalPath == 0 && s.totalComm == 0 && s.totalMed == 0 && s.totalLP == 0 && s.totalAgg == 0 && s.totalHop == 0 {
 		return Level2Babbling, true
 	}
 	return Level2None, false
 }
 
 func (p *BGPProcessor) findNormalAnomaly(s prefixStats, elapsed float64) (Level2EventType, bool) {
-	if s.totalAnn >= 3 && s.totalIncreases >= 2 && s.totalDecreases == 0 && s.totalWith >= 1 {
+	isPathHunting := s.totalAnn >= 2 && s.totalIncreases >= 1 && s.totalWith >= 1
+	isPolicyChurn := s.totalComm >= 3 || (s.totalPath >= 3 && s.totalIncreases+s.totalDecreases <= 1) || (s.totalMed+s.totalLP >= 2 && s.totalPath <= 2)
+	isPathLengthOsc := (s.totalIncreases+s.totalDecreases) >= 2 && float64(s.totalIncreases+s.totalDecreases)/elapsed > 0.005
+
+	if isPathHunting {
 		return Level2PathHunting, true
 	}
-	if s.totalComm >= 5 || (s.totalPath >= 5 && s.totalIncreases+s.totalDecreases <= 1) || (s.totalMed+s.totalLP >= 3 && s.totalPath <= 2) {
+	if isPolicyChurn {
 		return Level2PolicyChurn, true
 	}
-	if (s.totalIncreases+s.totalDecreases) >= 3 && float64(s.totalIncreases+s.totalDecreases)/elapsed > 0.01 {
+	if isPathLengthOsc {
 		return Level2PathLengthOscillation, true
 	}
+
 	// Discovery as the catch-all for high volume activity (>= 30 messages)
 	// that didn't match any "Bad" anomaly or specific "Normal" pattern.
 	if s.totalMsgs >= 30 {
@@ -785,7 +864,7 @@ func (p *BGPProcessor) findNormalAnomaly(s prefixStats, elapsed float64) (Level2
 	return Level2None, false
 }
 
-func (p *BGPProcessor) recordClassification(prefix string, state *bgpproto.PrefixState, eventType Level2EventType, now int64) {
+func (p *BGPProcessor) recordClassification(prefix string, state *bgpproto.PrefixState, eventType Level2EventType, now int64) pendingEvent {
 	p.level2Stats[eventType]++
 	if p.level2UniquePrefixes[eventType] == nil {
 		p.level2UniquePrefixes[eventType] = make(map[string]struct{})
@@ -802,28 +881,17 @@ func (p *BGPProcessor) recordClassification(prefix string, state *bgpproto.Prefi
 		}
 	}
 
-	// Trigger visual event for classification
-	if lat, lng, cc := p.geo(p.prefixToIP(prefix)); cc != "" {
-		p.onEvent(lat, lng, cc, EventUpdate, eventType, prefix, originASN)
-	}
-
 	// Record that this prefix is now classified
 	state.ClassifiedType = int32(eventType)
 	state.ClassifiedTimeTs = now
 
-	if p.stateDB != nil {
-		p.deleteState(prefix)
+	return pendingEvent{
+		ip:         p.prefixToIP(prefix),
+		prefix:     prefix,
+		asn:        originASN,
+		eventType:  EventUpdate,
+		level2Type: eventType,
 	}
-}
-
-func (p *BGPProcessor) deleteState(prefix string) {
-	if p.stateDB == nil || p.isStopping() {
-		return
-	}
-
-	go func() {
-		p.stateDeleteQueue <- prefix
-	}()
 }
 
 func (p *BGPProcessor) hasRouteLeak(prefix string, ctx *MessageContext) bool {

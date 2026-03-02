@@ -2,7 +2,6 @@ package sources
 
 import (
 	"bytes"
-	"net"
 	"testing"
 )
 
@@ -47,34 +46,5 @@ func TestParseGoogleRanges(t *testing.T) {
 
 	if prefixes[0].Region != "us-east1" {
 		t.Errorf("Unexpected region: %s", prefixes[0].Region)
-	}
-}
-
-func TestCloudTrie(t *testing.T) {
-	_, net1, _ := net.ParseCIDR("1.2.3.0/24")
-	_, net2, _ := net.ParseCIDR("5.6.0.0/16")
-
-	prefixes := []CloudPrefix{
-		{Prefix: net1, Region: "us-east-1", Service: "AWS"},
-		{Prefix: net2, Region: "europe-west1", Service: "GCP"},
-	}
-
-	ct := NewCloudTrie(prefixes)
-
-	tests := []struct {
-		ip   string
-		want string
-		ok   bool
-	}{
-		{"1.2.3.4", "Ashburn|US", true},
-		{"5.6.7.8", "St. Ghislain|BE", true},
-		{"8.8.8.8", "", false},
-	}
-
-	for _, tt := range tests {
-		city, ok := ct.Lookup(net.ParseIP(tt.ip))
-		if ok != tt.ok || city != tt.want {
-			t.Errorf("Lookup(%s) = (%s, %v); want (%s, %v)", tt.ip, city, ok, tt.want, tt.ok)
-		}
 	}
 }
