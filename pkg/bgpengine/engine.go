@@ -1530,6 +1530,13 @@ func (e *Engine) recordEvent(lat, lng float64, cc string, eventType EventType, l
 		// Track all anomalies and patterns
 		e.prefixToLevel2[prefix] = level2Type
 
+		// If this is an announcement, clear any existing Outage classification for this prefix
+		if eventType == EventNew || eventType == EventUpdate || eventType == EventGossip {
+			if prefixes, ok := e.currentAnomalies[Level2Outage]; ok {
+				delete(prefixes, prefix)
+			}
+		}
+
 		if actualType, ok := e.prefixToLevel2[prefix]; ok {
 			if e.currentAnomalies[actualType] == nil {
 				e.currentAnomalies[actualType] = make(map[string]int)

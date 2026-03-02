@@ -72,3 +72,32 @@ func TestGetPriority(t *testing.T) {
 		}
 	}
 }
+
+func TestEngineOutageClearing(t *testing.T) {
+	e := NewEngine(1024, 768, 1.0)
+
+	prefix := "1.2.3.0/24"
+
+	// 1. Manually record an outage event
+	e.recordEvent(0, 0, "US", EventUnknown, Level2Outage, prefix, 0)
+
+	if e.prefixToLevel2[prefix] != Level2Outage {
+		t.Errorf("Expected prefixToLevel2 to be Level2Outage, got %v", e.prefixToLevel2[prefix])
+	}
+	if _, ok := e.currentAnomalies[Level2Outage][prefix]; !ok {
+		t.Error("Expected prefix in currentAnomalies[Level2Outage]")
+	}
+
+	// 2. Record an announcement event (EventUpdate) for the same prefix
+	// This should clear the Level2Outage from currentAnomalies
+	e.recordEvent(0, 0, "US", EventUpdate, Level2None, prefix, 0)
+
+	if e.prefixToLevel2[prefix] != Level2None {
+		t.Errorf("Expected prefixToLevel2 to be Level2None, got %v", e.prefixToLevel2[prefix])
+	}
+
+	// Verify it's gone from currentAnomalies[Level2Outage]
+	if _, ok := e.currentAnomalies[Level2Outage][prefix]; ok {
+		t.Error("Expected prefix to be REMOVED from currentAnomalies[Level2Outage] after announce")
+	}
+}
