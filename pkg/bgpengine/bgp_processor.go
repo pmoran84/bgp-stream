@@ -73,11 +73,11 @@ func NewBGPProcessor(geo IPCoordsProvider, seenDB, stateDB *utils.DiskTrie, asnM
 			Time time.Time
 			Type EventType
 		}](1000000),
-		prefixStates:         prefixStates,
-		classifier:           NewClassifier(seenDB, stateDB, asnMapping, rpki, prefixToIP, prefixStates),
-		stateWriteQueue:      make(chan map[string]*bgpproto.PrefixState, 200),
-		stateDeleteQueue:     make(chan string, 2000),
-		url:                  "wss://ris-live.ripe.net/v1/ws/?client=github.com/sudorandom/bgp-stream",
+		prefixStates:     prefixStates,
+		classifier:       NewClassifier(seenDB, stateDB, asnMapping, rpki, prefixToIP, prefixStates),
+		stateWriteQueue:  make(chan map[string]*bgpproto.PrefixState, 200),
+		stateDeleteQueue: make(chan string, 2000),
+		url:              "wss://ris-live.ripe.net/v1/ws/?client=github.com/sudorandom/bgp-stream",
 	}
 
 	if stateDB != nil {
@@ -180,10 +180,10 @@ func (p *BGPProcessor) connectAndSubscribe() (*websocket.Conn, error) {
 }
 
 type pendingEvent struct {
-	ip         uint32
-	prefix     string
-	asn        uint32
-	eventType  EventType
+	ip                 uint32
+	prefix             string
+	asn                uint32
+	eventType          EventType
 	classificationType ClassificationType
 }
 

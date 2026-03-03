@@ -199,13 +199,13 @@ type Engine struct {
 	VisualHubs map[string]*VisualHub
 	ActiveHubs []*VisualHub
 
-	prefixImpactHistory []map[string]int
-	prefixToASN         map[string]uint32
-	prefixToClassification      map[string]ClassificationType
-	currentAnomalies    map[ClassificationType]map[string]int
-	VisualImpact        map[string]*VisualImpact
-	ActiveImpacts       []*VisualImpact
-	ActiveASNImpacts    []*ASNImpact
+	prefixImpactHistory    []map[string]int
+	prefixToASN            map[string]uint32
+	prefixToClassification map[string]ClassificationType
+	currentAnomalies       map[ClassificationType]map[string]int
+	VisualImpact           map[string]*VisualImpact
+	ActiveImpacts          []*VisualImpact
+	ActiveASNImpacts       []*ASNImpact
 
 	SeenDB  *utils.DiskTrie
 	StateDB *utils.DiskTrie
@@ -344,30 +344,30 @@ func NewEngine(width, height int, scale float64) *Engine {
 				return &BufferedCity{}
 			},
 		},
-		seenBuffer:          make(map[string]uint32),
-		nextPulseEmittedAt:  time.Now(),
-		fontSource:          s,
-		monoSource:          m,
-		countryActivity:     make(map[string]int),
-		history:             make([]MetricSnapshot, 120),
-		hubChangedAt:        make(map[string]time.Time),
-		lastHubs:            make(map[string]int),
-		hubPosition:         make(map[string]int),
-		lastMetricsUpdate:   time.Now(),
-		VisualHubs:          make(map[string]*VisualHub),
-		prefixImpactHistory: make([]map[string]int, 60), // 60 buckets * 20s = 20 mins
-		prefixToClassification:      make(map[string]ClassificationType),
-		currentAnomalies:    make(map[ClassificationType]map[string]int),
-		VisualImpact:        make(map[string]*VisualImpact),
-		impactMap:           make(map[string]*VisualImpact),
-		countMap:            make(map[string]*PrefixCount),
-		asnsPerClass:        make(map[string]map[uint32]struct{}),
-		asnGroups:           make(map[asnGroupKey]*asnGroup),
-		lastFrameCapturedAt: time.Now(),
-		drawOp:              &ebiten.DrawImageOptions{},
-		textOp:              &text.DrawOptions{},
-		vectorDrawPathOp:    vector.DrawPathOptions{AntiAlias: true},
-		vectorStrokeOp:      vector.StrokeOptions{Width: 3, LineJoin: vector.LineJoinBevel, LineCap: vector.LineCapButt},
+		seenBuffer:             make(map[string]uint32),
+		nextPulseEmittedAt:     time.Now(),
+		fontSource:             s,
+		monoSource:             m,
+		countryActivity:        make(map[string]int),
+		history:                make([]MetricSnapshot, 120),
+		hubChangedAt:           make(map[string]time.Time),
+		lastHubs:               make(map[string]int),
+		hubPosition:            make(map[string]int),
+		lastMetricsUpdate:      time.Now(),
+		VisualHubs:             make(map[string]*VisualHub),
+		prefixImpactHistory:    make([]map[string]int, 60), // 60 buckets * 20s = 20 mins
+		prefixToClassification: make(map[string]ClassificationType),
+		currentAnomalies:       make(map[ClassificationType]map[string]int),
+		VisualImpact:           make(map[string]*VisualImpact),
+		impactMap:              make(map[string]*VisualImpact),
+		countMap:               make(map[string]*PrefixCount),
+		asnsPerClass:           make(map[string]map[uint32]struct{}),
+		asnGroups:              make(map[asnGroupKey]*asnGroup),
+		lastFrameCapturedAt:    time.Now(),
+		drawOp:                 &ebiten.DrawImageOptions{},
+		textOp:                 &text.DrawOptions{},
+		vectorDrawPathOp:       vector.DrawPathOptions{AntiAlias: true},
+		vectorStrokeOp:         vector.StrokeOptions{Width: 3, LineJoin: vector.LineJoinBevel, LineCap: vector.LineCapButt},
 	}
 	e.dataMgr = geoservice.NewDataManager(e.geo)
 

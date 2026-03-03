@@ -72,7 +72,7 @@ func TestClassifier_FindCriticalAnomaly(t *testing.T) {
 		// Mock seen DB for historical origin
 		seenDBPath := filepath.Join(t.TempDir(), "test-seen-classifier.db")
 		seenDB, _ := utils.OpenDiskTrie(seenDBPath)
-		defer seenDB.Close()
+		defer func() { _ = seenDB.Close() }()
 
 		asnBytes := make([]byte, 4)
 		binary.BigEndian.PutUint32(asnBytes, 100)
@@ -86,9 +86,9 @@ func TestClassifier_FindCriticalAnomaly(t *testing.T) {
 		}
 
 		ctx := &MessageContext{
-			OriginASN: 200, // Different from 100
+			OriginASN:      200, // Different from 100
 			LastRpkiStatus: int32(utils.RPKIInvalidASN),
-			Now: now,
+			Now:            now,
 		}
 
 		et, ok := c.findCriticalAnomaly("1.1.1.0/24", s, 65.0, ctx)

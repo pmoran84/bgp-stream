@@ -107,30 +107,30 @@ type prefixStats struct {
 }
 
 type Classifier struct {
-	seenDB       *utils.DiskTrie
-	stateDB      *utils.DiskTrie
-	asnMapping   *utils.ASNMapping
-	rpki         *utils.RPKIManager
-	prefixToIP   PrefixToIPConverter
+	seenDB     *utils.DiskTrie
+	stateDB    *utils.DiskTrie
+	asnMapping *utils.ASNMapping
+	rpki       *utils.RPKIManager
+	prefixToIP PrefixToIPConverter
 
 	classificationStats          map[ClassificationType]int
 	classificationUniquePrefixes map[ClassificationType]map[string]struct{}
 	totalClassificationEvents    int
-	prefixStates         *utils.LRUCache[string, *bgpproto.PrefixState]
+	prefixStates                 *utils.LRUCache[string, *bgpproto.PrefixState]
 
 	mu sync.Mutex
 }
 
 func NewClassifier(seenDB, stateDB *utils.DiskTrie, asnMapping *utils.ASNMapping, rpki *utils.RPKIManager, prefixToIP PrefixToIPConverter, prefixStates *utils.LRUCache[string, *bgpproto.PrefixState]) *Classifier {
 	return &Classifier{
-		seenDB:               seenDB,
-		stateDB:              stateDB,
-		asnMapping:           asnMapping,
-		rpki:                 rpki,
-		prefixToIP:           prefixToIP,
+		seenDB:                       seenDB,
+		stateDB:                      stateDB,
+		asnMapping:                   asnMapping,
+		rpki:                         rpki,
+		prefixToIP:                   prefixToIP,
 		classificationStats:          make(map[ClassificationType]int),
 		classificationUniquePrefixes: make(map[ClassificationType]map[string]struct{}),
-		prefixStates:         prefixStates,
+		prefixStates:                 prefixStates,
 	}
 }
 
@@ -174,7 +174,7 @@ func (c *Classifier) classifyEvent(prefix string, ctx *MessageContext) (pendingE
 			status, err := c.rpki.Validate(prefix, ctx.OriginASN)
 			if err == nil {
 				state.LastRpkiStatus = int32(status)
-				state.LastOriginAsn  = ctx.OriginASN
+				state.LastOriginAsn = ctx.OriginASN
 			}
 		}
 	}
@@ -194,10 +194,10 @@ func (c *Classifier) classifyEvent(prefix string, ctx *MessageContext) (pendingE
 			ClassificationType(state.ClassifiedType) != ClassificationPathLengthOscillation {
 			// If it's a Normal anomaly, we still allow upgrade to Bad/Critical
 			return pendingEvent{
-				ip:         c.prefixToIP(prefix),
-				prefix:     prefix,
-				asn:        ctx.OriginASN,
-				eventType:  ctx.EventType(),
+				ip:                 c.prefixToIP(prefix),
+				prefix:             prefix,
+				asn:                ctx.OriginASN,
+				eventType:          ctx.EventType(),
 				classificationType: ClassificationType(state.ClassifiedType),
 			}, true
 		}
@@ -302,10 +302,10 @@ func (c *Classifier) evaluatePrefixState(prefix string, state *bgpproto.PrefixSt
 				// We already have a classification of equal or higher priority
 				// Just return the event for the current classification
 				return pendingEvent{
-					ip:         c.prefixToIP(prefix),
-					prefix:     prefix,
-					asn:        ctx.OriginASN,
-					eventType:  ctx.EventType(),
+					ip:                 c.prefixToIP(prefix),
+					prefix:             prefix,
+					asn:                ctx.OriginASN,
+					eventType:          ctx.EventType(),
 					classificationType: ClassificationType(state.ClassifiedType),
 				}, true
 			}
@@ -670,10 +670,10 @@ func (c *Classifier) recordClassification(prefix string, state *bgpproto.PrefixS
 	state.ClassifiedTimeTs = now
 
 	return pendingEvent{
-		ip:         c.prefixToIP(prefix),
-		prefix:     prefix,
-		asn:        originASN,
-		eventType:  ctx.EventType(),
+		ip:                 c.prefixToIP(prefix),
+		prefix:             prefix,
+		asn:                originASN,
+		eventType:          ctx.EventType(),
 		classificationType: eventType,
 	}
 }
