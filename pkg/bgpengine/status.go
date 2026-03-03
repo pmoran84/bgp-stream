@@ -115,7 +115,7 @@ func (e *Engine) drawHubs(screen *ebiten.Image, margin, hubYBase, boxW, fontSize
 		text.Draw(e.hubsBuffer, vh.RateStr, e.subMonoFace, e.textOp)
 	}
 
-	now := time.Now()
+	now := e.Now()
 	isHubUpdating := now.Sub(e.hubUpdatedAt) < 2*time.Second
 	hubIntensity := 0.0
 	if isHubUpdating {
@@ -281,7 +281,7 @@ func (e *Engine) drawImpacts(screen *ebiten.Image, margin, impactYBase, boxW, im
 		}
 	}
 
-	now := time.Now()
+	now := e.Now()
 	isImpactUpdating := now.Sub(e.impactUpdatedAt) < 2*time.Second
 	impactIntensity := 0.0
 	if isImpactUpdating {
@@ -291,7 +291,7 @@ func (e *Engine) drawImpacts(screen *ebiten.Image, margin, impactYBase, boxW, im
 }
 
 func (e *Engine) drawNowPlaying(screen *ebiten.Image, margin, boxW, fontSize float64, face *text.GoTextFace) {
-	now := time.Now()
+	now := e.Now()
 	if e.CurrentSong == "" {
 		return
 	}
@@ -667,8 +667,18 @@ func (e *Engine) drawTrendLayers(chartW, chartH, globalMaxLog float64) {
 	}
 
 	for j := 0; j < hLen-1; j++ {
-		g1, p1, b1, c1 := e.aggregateMetrics(&e.history[j])
-		g2, p2, b2, c2 := e.aggregateMetrics(&e.history[j+1])
+		// Smoothing: average current snapshot with the previous one
+		avgMetrics := func(idx int) (int, int, int, int) {
+			if idx <= 0 {
+				return e.aggregateMetrics(&e.history[idx])
+			}
+			g1, p1, b1, c1 := e.aggregateMetrics(&e.history[idx-1])
+			g2, p2, b2, c2 := e.aggregateMetrics(&e.history[idx])
+			return (g1 + g2) / 2, (p1 + p2) / 2, (b1 + b2) / 2, (c1 + c2) / 2
+		}
+
+		g1, p1, b1, c1 := avgMetrics(j)
+		g2, p2, b2, c2 := avgMetrics(j + 1)
 
 		// Draw lines in order from bottom to top (Good -> Policy -> Bad -> Crit)
 		drawLine(g1, g2, goodCol, j)
@@ -682,14 +692,14 @@ func (e *Engine) StartMetricsLoop() {
 	ticker := time.NewTicker(1 * time.Second)
 	uiTicks := 0
 	logTicks := 0
-	lastUIUpdate := time.Now()
+	lastUIUpdate := e.Now()
 	firstRun := true
 
 	run := func() {
 		e.metricsMu.Lock()
 		defer e.metricsMu.Unlock()
 
-		now := time.Now()
+		now := e.Now()
 		interval := now.Sub(e.lastMetricsUpdate).Seconds()
 		if interval <= 0 {
 			interval = 1.0

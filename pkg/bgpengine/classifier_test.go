@@ -11,7 +11,7 @@ import (
 )
 
 func TestClassifier_HasRouteLeak(t *testing.T) {
-	c := NewClassifier(nil, nil, nil, nil, nil, nil)
+	c := NewClassifier(nil, nil, nil, nil, nil, nil, time.Now)
 
 	tests := []struct {
 		name    string
@@ -57,7 +57,7 @@ func TestClassifier_HasRouteLeak(t *testing.T) {
 }
 
 func TestClassifier_FindCriticalAnomaly(t *testing.T) {
-	c := NewClassifier(nil, nil, nil, nil, nil, nil)
+	c := NewClassifier(nil, nil, nil, nil, nil, nil, time.Now)
 	now := time.Now()
 
 	t.Run("Outage Detection", func(t *testing.T) {
@@ -99,7 +99,7 @@ func TestClassifier_FindCriticalAnomaly(t *testing.T) {
 }
 
 func TestClassifier_FindBadAnomaly(t *testing.T) {
-	c := NewClassifier(nil, nil, nil, nil, nil, nil)
+	c := NewClassifier(nil, nil, nil, nil, nil, nil, time.Now)
 
 	tests := []struct {
 		name        string
@@ -154,7 +154,7 @@ func TestClassifier_FindBadAnomaly(t *testing.T) {
 }
 
 func TestClassifier_FindNormalAnomaly(t *testing.T) {
-	c := NewClassifier(nil, nil, nil, nil, nil, nil)
+	c := NewClassifier(nil, nil, nil, nil, nil, nil, time.Now)
 
 	tests := []struct {
 		name    string
@@ -204,7 +204,7 @@ func TestClassifier_FindNormalAnomaly(t *testing.T) {
 }
 
 func TestClassifier_IsHelpers(t *testing.T) {
-	c := NewClassifier(nil, nil, nil, nil, nil, nil)
+	c := NewClassifier(nil, nil, nil, nil, nil, nil, time.Now)
 
 	if !c.isTier1(174) {
 		t.Errorf("isTier1(174) expected true")

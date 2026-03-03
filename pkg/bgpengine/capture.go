@@ -7,11 +7,90 @@ import (
 	"image/png"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 )
+
+func (e *Engine) InitVideoWriter() error {
+	if e.VideoPath == "" {
+		return nil
+	}
+
+	// Support raw output to a file if extension is .raw
+	if strings.HasSuffix(strings.ToLower(e.VideoPath), ".raw") {
+		f, err := os.Create(e.VideoPath)
+		if err != nil {
+			return err
+		}
+		e.VideoWriter = f
+		log.Printf("Started recording raw frames to: %s", e.VideoPath)
+		return nil
+	}
+
+	// Check if ffmpeg is available
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return fmt.Errorf("ffmpeg is required for video recording: %w", err)
+	}
+
+	// High-quality video recording: 3840x2160, 30fps, libx264
+	// We're piping raw RGBA frames from ebiten directly into ffmpeg.
+	cmd := exec.Command("ffmpeg",
+		"-y",
+		"-f", "rawvideo",
+		"-pix_fmt", "rgba",
+		"-s", fmt.Sprintf("%dx%d", e.Width, e.Height),
+		"-r", "30",
+		"-i", "-",
+		"-c:v", "libx264",
+		"-preset", "ultrafast",
+		"-crf", "18",
+		"-pix_fmt", "yuv420p",
+		e.VideoPath,
+	)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+
+	// Capture stderr to log ffmpeg output if needed
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	e.VideoWriter = stdin
+	e.VideoCmd = cmd
+	log.Printf("Started recording video to: %s", e.VideoPath)
+	return nil
+}
+
+func (e *Engine) captureVideoFrame(img *ebiten.Image) {
+	if e.VideoWriter == nil {
+		return
+	}
+
+	if e.videoBuffer == nil {
+		e.videoBuffer = make([]byte, e.Width*e.Height*4)
+	}
+
+	// ebiten.Image.ReadPixels is synchronous and slow for large images,
+	// but necessary for high-quality frame-accurate video capture.
+	// When recording, we accept the performance hit.
+	img.ReadPixels(e.videoBuffer)
+
+	// Write raw bytes directly to ffmpeg's stdin pipe or raw file
+	if _, err := e.VideoWriter.Write(e.videoBuffer); err != nil {
+		log.Printf("Error writing video frame: %v", err)
+		_ = e.VideoWriter.Close()
+		e.VideoWriter = nil
+	}
+}
 
 func (e *Engine) captureFrame(img *ebiten.Image, suffix string, timestamp time.Time) {
 	if e.FrameCaptureDir == "" {

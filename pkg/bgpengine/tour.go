@@ -23,7 +23,7 @@ var regions = []tourRegion{
 }
 
 func (e *Engine) UpdateTour() {
-	now := time.Now()
+	now := e.Now()
 	regionStayDuration := e.tourRegionStayDuration
 	tourDuration := time.Duration(len(regions)) * regionStayDuration
 
@@ -38,7 +38,7 @@ func (e *Engine) UpdateTour() {
 	case e.tourRegionIndex != -1:
 		// No manual tour active
 		e.tourRegionIndex = -1
-		e.lastTourStateChange = time.Now()
+		e.lastTourStateChange = e.Now()
 		e.targetCX = float64(e.Width) / 2
 		e.targetCY = float64(e.Height) / 2
 		e.targetZoom = 1.0
@@ -54,7 +54,7 @@ func (e *Engine) UpdateTour() {
 			if e.tourRegionIndex != regionIdx {
 				// New region transition
 				e.tourRegionIndex = regionIdx
-				e.lastTourStateChange = time.Now()
+				e.lastTourStateChange = e.Now()
 				region := regions[regionIdx]
 				e.targetCX, e.targetCY = e.geo.Project(region.lat, region.lng)
 				e.targetZoom = region.zoom
@@ -62,7 +62,7 @@ func (e *Engine) UpdateTour() {
 		}
 	} else if e.tourRegionIndex != -1 { // Zoom out to full map
 		e.tourRegionIndex = -1
-		e.lastTourStateChange = time.Now()
+		e.lastTourStateChange = e.Now()
 		e.targetCX = float64(e.Width) / 2
 		e.targetCY = float64(e.Height) / 2
 		e.targetZoom = 1.0

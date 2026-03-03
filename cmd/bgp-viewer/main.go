@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/sudorandom/bgp-stream/pkg/bgpengine"
@@ -34,8 +35,11 @@ var (
 	hideWindowControls = flag.Bool("hide-window-controls", false, "Whether to hide window decorations (title bar, etc.)")
 	floating           = flag.Bool("floating", false, "Whether to keep the window always on top")
 	captureInterval    = flag.Duration("capture-interval", 0, "Interval to periodically capture high-quality frames (e.g., 1m, 1h). 0 to disable.")
-	captureDir         = flag.String("capture-dir", "captures", "Directory to store captured frames")
-	minimalUI          = flag.Bool("minimal-ui", false, "Start with only the map and now-playing panel visible")
+	captureDir         *string = flag.String("capture-dir", "captures", "Directory to store captured frames")
+	minimalUI          *bool   = flag.Bool("minimal-ui", false, "Start with only the map and now-playing panel visible")
+	hideUI             *bool   = flag.Bool("hide-ui", false, "Hide all UI elements")
+	videoPath          *string = flag.String("video", "", "Path to save recorded video (implies -hide-ui and -tps 30)")
+	videoDelay         = flag.Duration("video-delay", 8*time.Second, "Delay before starting video recording")
 	mmdbFiles          multiFlag
 )
 
@@ -44,6 +48,11 @@ func main() {
 	flag.Parse()
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
+	if *videoPath != "" {
+		*hideUI = true
+		*tpsFlag = 30 // Ensure consistent FPS for recording
+	}
 
 	engine := initEngine()
 
@@ -57,7 +66,17 @@ func initEngine() *bgpengine.Engine {
 	engine.FrameCaptureInterval = *captureInterval
 	engine.FrameCaptureDir = *captureDir
 	engine.MinimalUI = *minimalUI
+	engine.HideUI = *hideUI
+	engine.VideoPath = *videoPath
+	engine.VideoStartDelay = *videoDelay
 	engine.MMDBFiles = mmdbFiles
+
+	// Initialize video writer if requested
+	if engine.VideoPath != "" {
+		if err := engine.InitVideoWriter(); err != nil {
+			log.Fatalf("Fatal: Failed to initialize video writer: %v", err)
+		}
+	}
 
 	// If audio-fd is provided, use it for streaming audio
 	if *audioFd != -1 {

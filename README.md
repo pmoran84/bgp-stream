@@ -92,12 +92,15 @@ just test
 ## Command-Line Options
 
 ### bgp-viewer
-- `-width`: Internal rendering width (default: 1920)
-- `-height`: Internal rendering height (default: 1080)
-- `-scale`: Internal rendering scale (default: 380.0)
+- `-width`: Internal rendering width (default: 3840)
+- `-height`: Internal rendering height (default: 2160)
+- `-scale`: Internal rendering scale (default: 760.0)
 - `-capture-interval`: Interval to save high-quality PNG frames (e.g. `1h`, `24h`)
-- `-capture-dir`: Directory to store captures (default: `archive`)
+- `-capture-dir`: Directory to store captures (default: `captures`)
 - `-minimal-ui`: Start with a cleaner UI (map only)
+- `-hide-ui`: Hide all UI elements, including panels and labels (useful for clean recordings)
+- `-video <path>`: Record high-quality video to the specified path (requires `ffmpeg`). Implies `-hide-ui`.
+- `-video-delay <duration>`: Delay before starting video recording (default: `8s`).
 
 ### bgp-data-fetcher
 - `-fresh`: Re-download all source files even if they are already cached. Useful for ensuring the latest RIR/WHOIS data.

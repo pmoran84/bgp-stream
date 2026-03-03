@@ -117,11 +117,12 @@ type Classifier struct {
 	classificationUniquePrefixes map[ClassificationType]map[string]struct{}
 	totalClassificationEvents    int
 	prefixStates                 *utils.LRUCache[string, *bgpproto.PrefixState]
+	timeProvider                 TimeProvider
 
 	mu sync.Mutex
 }
 
-func NewClassifier(seenDB, stateDB *utils.DiskTrie, asnMapping *utils.ASNMapping, rpki *utils.RPKIManager, prefixToIP PrefixToIPConverter, prefixStates *utils.LRUCache[string, *bgpproto.PrefixState]) *Classifier {
+func NewClassifier(seenDB, stateDB *utils.DiskTrie, asnMapping *utils.ASNMapping, rpki *utils.RPKIManager, prefixToIP PrefixToIPConverter, prefixStates *utils.LRUCache[string, *bgpproto.PrefixState], timeProvider TimeProvider) *Classifier {
 	return &Classifier{
 		seenDB:                       seenDB,
 		stateDB:                      stateDB,
@@ -131,6 +132,7 @@ func NewClassifier(seenDB, stateDB *utils.DiskTrie, asnMapping *utils.ASNMapping
 		classificationStats:          make(map[ClassificationType]int),
 		classificationUniquePrefixes: make(map[ClassificationType]map[string]struct{}),
 		prefixStates:                 prefixStates,
+		timeProvider:                 timeProvider,
 	}
 }
 

@@ -180,7 +180,7 @@ func TestHijackDetection(t *testing.T) {
 
 			p := NewBGPProcessor(func(uint32) (float64, float64, string, geoservice.ResolutionType) {
 				return 0, 0, "US", geoservice.ResGeoIP
-			}, seenDB, nil, nil, rpki, func(string) uint32 { return 0 }, onEvent)
+			}, seenDB, nil, nil, rpki, func(string) uint32 { return 0 }, time.Now, onEvent)
 
 			if tt.setup != nil {
 				tt.setup(p)

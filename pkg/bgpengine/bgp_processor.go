@@ -19,6 +19,7 @@ import (
 type BGPEventCallback func(lat, lng float64, cc string, eventType EventType, classificationType ClassificationType, prefix string, asn uint32)
 type IPCoordsProvider func(ip uint32) (float64, float64, string, geoservice.ResolutionType)
 type PrefixToIPConverter func(p string) uint32
+type TimeProvider func() time.Time
 
 type RISMessageData struct {
 	Announcements []struct {
@@ -43,6 +44,7 @@ type BGPProcessor struct {
 	rpki         *utils.RPKIManager
 	onEvent      BGPEventCallback
 	prefixToIP   PrefixToIPConverter
+	timeProvider TimeProvider
 	recentlySeen *utils.LRUCache[uint32, struct {
 		Time time.Time
 		Type EventType
@@ -59,7 +61,7 @@ type BGPProcessor struct {
 	stopping atomic.Bool
 }
 
-func NewBGPProcessor(geo IPCoordsProvider, seenDB, stateDB *utils.DiskTrie, asnMapping *utils.ASNMapping, rpki *utils.RPKIManager, prefixToIP PrefixToIPConverter, onEvent BGPEventCallback) *BGPProcessor {
+func NewBGPProcessor(geo IPCoordsProvider, seenDB, stateDB *utils.DiskTrie, asnMapping *utils.ASNMapping, rpki *utils.RPKIManager, prefixToIP PrefixToIPConverter, timeProvider TimeProvider, onEvent BGPEventCallback) *BGPProcessor {
 	prefixStates := utils.NewLRUCache[string, *bgpproto.PrefixState](1000000)
 	p := &BGPProcessor{
 		geo:        geo,
@@ -69,12 +71,13 @@ func NewBGPProcessor(geo IPCoordsProvider, seenDB, stateDB *utils.DiskTrie, asnM
 		rpki:       rpki,
 		onEvent:    onEvent,
 		prefixToIP: prefixToIP,
+		timeProvider: timeProvider,
 		recentlySeen: utils.NewLRUCache[uint32, struct {
 			Time time.Time
 			Type EventType
 		}](1000000),
 		prefixStates:     prefixStates,
-		classifier:       NewClassifier(seenDB, stateDB, asnMapping, rpki, prefixToIP, prefixStates),
+		classifier:       NewClassifier(seenDB, stateDB, asnMapping, rpki, prefixToIP, prefixStates, timeProvider),
 		stateWriteQueue:  make(chan map[string]*bgpproto.PrefixState, 200),
 		stateDeleteQueue: make(chan string, 2000),
 		url:              "wss://ris-live.ripe.net/v1/ws/?client=github.com/sudorandom/bgp-stream",
@@ -232,7 +235,7 @@ func (p *BGPProcessor) startWithdrawalPacer(pendingWithdrawals map[uint32]struct
 		defer ticker.Stop()
 		ticks := 0
 		for range ticker.C {
-			now := time.Now()
+			now := p.timeProvider()
 			p.mu.Lock()
 
 			for ip, entry := range pendingWithdrawals {
@@ -276,7 +279,7 @@ func (p *BGPProcessor) handleRISMessage(data *RISMessageData, pendingWithdrawals
 	}
 
 	var events []pendingEvent
-	now := time.Now()
+	now := p.timeProvider()
 	events = append(events, p.handleWithdrawals(data.Withdrawals, originASN, now, pendingWithdrawals)...)
 	events = append(events, p.handleAnnouncements(data.Announcements, originASN, now, pendingWithdrawals)...)
 

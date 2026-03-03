@@ -16,6 +16,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"os/exec"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -227,6 +228,14 @@ type Engine struct {
 	dataMgr     *geoservice.DataManager
 	MMDBFiles   []string
 
+	HideUI                 bool
+	VideoPath              string
+	VideoWriter            io.WriteCloser
+	VideoCmd               *exec.Cmd
+	videoBuffer            []byte
+	VideoStartDelay        time.Duration
+	virtualTime            time.Time
+	virtualStartTime       time.Time
 	MinimalUI              bool
 	minimalUIKeyPressed    bool
 	tourKeyPressed         bool
@@ -336,6 +345,16 @@ type asnGroup struct {
 	color    color.RGBA
 	priority int
 	maxCount float64
+}
+
+func (e *Engine) Now() time.Time {
+	if e.VideoWriter != nil {
+		if e.virtualTime.IsZero() {
+			e.virtualTime = time.Now()
+		}
+		return e.virtualTime
+	}
+	return time.Now()
 }
 
 func NewEngine(width, height int, scale float64) *Engine {
@@ -538,7 +557,7 @@ func (e *Engine) LoadRemainingData() error {
 		log.Printf("Warning: Failed to load ASN mapping: %v", err)
 	}
 
-	e.processor = NewBGPProcessor(e.GetIPCoords, e.SeenDB, e.StateDB, e.asnMapping, e.RPKI, e.prefixToIP, e.recordEvent)
+	e.processor = NewBGPProcessor(e.GetIPCoords, e.SeenDB, e.StateDB, e.asnMapping, e.RPKI, e.prefixToIP, e.Now, e.recordEvent)
 
 	log.Println("Engine startup complete. Listening for events...")
 
@@ -881,7 +900,7 @@ func (e *Engine) AddPulse(lat, lng float64, c color.RGBA, count int, isFlare ...
 		if radius > 240 {
 			radius = 240
 		}
-		e.pulses = append(e.pulses, Pulse{X: x, Y: y, StartTime: time.Now(), Color: c, MaxRadius: radius, IsFlare: flare})
+		e.pulses = append(e.pulses, Pulse{X: x, Y: y, StartTime: e.Now(), Color: c, MaxRadius: radius, IsFlare: flare})
 	} else {
 		e.droppedPulses.Add(1)
 	}
@@ -892,7 +911,7 @@ func (e *Engine) GetProcessor() *BGPProcessor {
 }
 
 func (e *Engine) UpdatePerformanceMetrics() {
-	now := time.Now()
+	now := e.Now()
 	if now.Sub(e.lastPerfLog) < 10*time.Second {
 		return
 	}
@@ -921,6 +940,16 @@ func (e *Engine) UpdatePerformanceMetrics() {
 }
 
 func (e *Engine) Update() error {
+	if e.VideoWriter != nil {
+		if e.virtualTime.IsZero() {
+			e.virtualTime = time.Now()
+			e.virtualStartTime = e.virtualTime
+		} else {
+			// Advance virtual clock by exactly 1/30s per frame
+			e.virtualTime = e.virtualTime.Add(time.Second / 30)
+		}
+	}
+
 	e.UpdateTour()
 	e.UpdatePerformanceMetrics()
 	e.updateVisualQueue()
@@ -931,7 +960,7 @@ func (e *Engine) Update() error {
 }
 
 func (e *Engine) updateVisualQueue() {
-	now := time.Now()
+	now := e.Now()
 	e.queueMu.Lock()
 	defer e.queueMu.Unlock()
 
@@ -963,7 +992,7 @@ func (e *Engine) updateInput() {
 
 	if ebiten.IsKeyPressed(ebiten.KeyT) {
 		if !e.tourKeyPressed {
-			e.tourManualStartTime = time.Now()
+			e.tourManualStartTime = e.Now()
 			e.tourOffset = 0 // Reset offset on manual start
 			e.tourKeyPressed = true
 		}
@@ -983,7 +1012,7 @@ func (e *Engine) updateInput() {
 
 func (e *Engine) handleTourSkip() {
 	// Calculate current elapsed time to figure out the next jump
-	now := time.Now()
+	now := e.Now()
 	tourDuration := time.Duration(len(regions)) * e.tourRegionStayDuration
 	cycleDuration := 10 * time.Minute
 	elapsedInCycle := now.Sub(now.Truncate(cycleDuration))
@@ -1049,7 +1078,7 @@ func (e *Engine) updateBeaconPercent() {
 }
 
 func (e *Engine) updateActivePulses() {
-	now := time.Now()
+	now := e.Now()
 	e.pulsesMu.Lock()
 	defer e.pulsesMu.Unlock()
 
@@ -1073,7 +1102,7 @@ func (e *Engine) Draw(screen *ebiten.Image) {
 		e.mapImage.Fill(color.RGBA{8, 10, 15, 255})
 	}
 	e.pulsesMu.Lock()
-	now := time.Now()
+	now := e.Now()
 	e.drawOp.GeoM.Reset()
 	e.drawOp.ColorScale.Reset()
 	e.drawOp.Filter = ebiten.FilterLinear // Use linear for smooth scaling
@@ -1136,11 +1165,19 @@ func (e *Engine) Draw(screen *ebiten.Image) {
 	e.ApplyTourTransform(e.drawOp)
 	screen.DrawImage(e.mapImage, e.drawOp)
 
-	e.DrawPIP(screen)
-	e.DrawBGPStatus(screen)
+	if !e.HideUI {
+		e.DrawPIP(screen)
+		e.DrawBGPStatus(screen)
+	}
 
 	if shouldCapture {
 		e.captureFrame(screen, "full", now)
+	}
+
+	if e.VideoWriter != nil {
+		if e.virtualStartTime.IsZero() || e.Now().Sub(e.virtualStartTime) >= e.VideoStartDelay {
+			e.captureVideoFrame(screen)
+		}
 	}
 }
 
@@ -1620,7 +1657,7 @@ func (e *Engine) scheduleVisualPulses(nextBatch []QueuedPulse) {
 	// We overlap batches to ensure a continuous flow (every 500ms we add a 1500ms batch)
 	spreadWindow := 1500 * time.Millisecond
 	spacing := spreadWindow / time.Duration(len(nextBatch))
-	now := time.Now()
+	now := e.Now()
 
 	// If we're too far behind (more than 1s), jump closer to 'now' but keep a small
 	// buffer to avoid a hard gap in the visualization.
@@ -1664,6 +1701,20 @@ func (e *Engine) scheduleVisualPulses(nextBatch []QueuedPulse) {
 }
 
 func (e *Engine) Stop() {
+	if e.VideoWriter != nil {
+		log.Printf("Closing video writer and finalizing video...")
+		if err := e.VideoWriter.Close(); err != nil {
+			log.Printf("Error closing video writer: %v", err)
+		}
+		if e.VideoCmd != nil {
+			if err := e.VideoCmd.Wait(); err != nil {
+				log.Printf("Error waiting for video encoder: %v", err)
+			}
+		}
+		log.Printf("Video generation complete.")
+		e.VideoWriter = nil
+	}
+
 	if e.audioPlayer != nil {
 		e.audioPlayer.Shutdown()
 	}
