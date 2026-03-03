@@ -63,6 +63,11 @@ func (m *ASNMapping) loadCustomOrgs() {
 		9808:  "CHINAMOBILE",
 		9242:  "CHINAMOBILE",
 
+		// China Unicom
+		4837:  "CHINAUNICOM",
+		9929:  "CHINAUNICOM",
+		10010: "CHINAUNICOM",
+
 		// Telstra
 		1221: "TELSTRA",
 		4637: "TELSTRA",
@@ -70,6 +75,9 @@ func (m *ASNMapping) loadCustomOrgs() {
 		// NTT
 		2914:  "NTT",
 		10103: "NTT",
+		2516:  "NTT",
+		2907:  "NTT",
+		7682:  "NTT",
 
 		// Tata
 		6453: "TATA",
@@ -80,12 +88,44 @@ func (m *ASNMapping) loadCustomOrgs() {
 		5580:  "GTT",
 		4436:  "GTT",
 		29686: "GTT",
+		225:   "GTT",
 
-		// Lumen / Level 3 / CenturyLink
+		// Lumen / Level 3 / CenturyLink / Global Crossing
 		3356:  "LUMEN",
 		209:   "LUMEN",
 		3549:  "LUMEN",
 		22561: "LUMEN",
+
+		// Zayo
+		6461:  "ZAYO",
+		12008: "ZAYO",
+
+		// Telia
+		1299:  "TELIA",
+		10492: "TELIA",
+
+		// Verizon / MCI / XO
+		701:   "VERIZON",
+		702:   "VERIZON",
+		703:   "VERIZON",
+		18451: "VERIZON",
+		2828:  "VERIZON",
+
+		// AT&T
+		7018: "ATT",
+		2686: "ATT",
+
+		// Orange / OpenTransit
+		5511: "ORANGE",
+		3215: "ORANGE",
+
+		// Telefonica
+		12956: "TELEFONICA",
+		6739:  "TELEFONICA",
+		22927: "TELEFONICA",
+		3326:  "TELEFONICA",
+		33667: "TELEFONICA",
+		13489: "TELEFONICA",
 	}
 
 	for asn, orgID := range knownSiblings {
@@ -111,8 +151,8 @@ func (m *ASNMapping) loadCustomOrgs() {
 }
 
 func (m *ASNMapping) loadCAIDA() error {
-	// Using a recent CAIDA AS-Org dataset
-	url := "https://public.data.caida.org/datasets/as-organizations/as-org2asn.txt.gz"
+	// Using the JSONL 'latest' symlink which is more reliable and easier to parse
+	url := "https://publicdata.caida.org/datasets/as-organizations/latest.as-org2info.jsonl.gz"
 	r, err := GetCachedReader(url, true, "[ASN-CAIDA]")
 	if err != nil {
 		return err
@@ -124,31 +164,21 @@ func (m *ASNMapping) loadCAIDA() error {
 	}()
 
 	scanner := bufio.NewScanner(r)
-	inASNSection := false
 	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "# aut") {
-			inASNSection = true
-			continue
+		var entry struct {
+			Type  string `json:"type"`
+			ASN   uint32 `json:"asn"`
+			OrgID string `json:"org_id"`
 		}
-		if !inASNSection || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		fields := strings.Split(line, "|")
-		if len(fields) < 3 {
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			continue
 		}
 
-		asn, err := strconv.ParseUint(fields[0], 10, 32)
-		if err != nil {
-			continue
+		if entry.Type == "as" && entry.ASN != 0 && entry.OrgID != "" {
+			info := m.data[entry.ASN]
+			info.OrgID = entry.OrgID
+			m.data[entry.ASN] = info
 		}
-
-		orgID := fields[2]
-		info := m.data[uint32(asn)]
-		info.OrgID = orgID
-		m.data[uint32(asn)] = info
 	}
 	return nil
 }
