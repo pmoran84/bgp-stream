@@ -1467,7 +1467,7 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 		return
 	}
 
-	now := time.Now()
+	now := e.Now()
 	asnToUse := ev.asn
 	if asnToUse == 0 {
 		asnToUse = ev.historicalASN
@@ -1491,7 +1491,6 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 			if e.updateExistingCriticalEvent(ce, ev) {
 				e.updateCriticalEventCacheStrs(ce)
 			}
-			ce.Timestamp = now // Update timestamp to show it's still active/relevant
 			e.streamDirty = true
 			return
 		}
