@@ -113,6 +113,21 @@ func TestClassifier_FindCriticalAnomaly(t *testing.T) {
 		if !ok || et != ClassificationOutage {
 			t.Errorf("findCriticalAnomaly() expected Outage, got %v, %v", et, ok)
 		}
+
+		t.Run("Should NOT detect outage if some peers still see the prefix", func(t *testing.T) {
+			s2 := &prefixStats{
+				totalAnn:       0,
+				totalWith:      3,
+				uniquePeers:    map[string]bool{"p4": true, "p5": true}, // 2 peers still see it
+				uniqueHosts:    map[string]bool{"h3": true},
+				withdrawnPeers: map[string]bool{"p1": true, "p2": true, "p3": true},
+				withdrawnHosts: map[string]bool{"h1": true, "h2": true},
+			}
+			et, _, ok := c.findCriticalAnomaly("1.1.1.0/24", s2, 65.0, &MessageContext{Now: now})
+			if ok && et == ClassificationOutage {
+				t.Errorf("findCriticalAnomaly() detected Outage but 2 peers still see the prefix!")
+			}
+		})
 	})
 
 	t.Run("Hijack High Signal Detection", func(t *testing.T) {

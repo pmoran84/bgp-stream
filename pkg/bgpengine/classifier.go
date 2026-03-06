@@ -538,7 +538,7 @@ func (c *Classifier) findCriticalAnomaly(prefix string, s *prefixStats, elapsed 
 
 	// Outage heuristic based on host diversity and total peers tracking the prefix
 	if s.totalAnn == 0 && elapsed > 60 {
-		if totalKnownPeers > 0 {
+		if totalKnownPeers > 0 && peerCount == 0 {
 			if totalKnownPeers <= 2 {
 				// For very small prefixes, require all known peers to be withdrawn
 				if withdrawnPeerCount >= totalKnownPeers {
