@@ -46,6 +46,13 @@ type prefixSegment struct {
 }
 
 func (dm *DataManager) LoadWorldCities() {
+	dm.geo.dataMu.RLock()
+	if len(dm.geo.cities) > 0 {
+		dm.geo.dataMu.RUnlock()
+		return
+	}
+	dm.geo.dataMu.RUnlock()
+
 	var citiesReader io.Reader
 	citiesPath := "./data/worldcities.csv"
 	if f, err := os.Open(citiesPath); err == nil {
@@ -78,6 +85,14 @@ func (dm *DataManager) LoadWorldCities() {
 				cc := strings.ToUpper(rec[5])
 				countryName := strings.ToUpper(rec[4])
 				cityName := strings.ToLower(rec[1])
+
+				pop := uint64(0)
+				if len(rec) >= 10 {
+					p, _ := strconv.ParseFloat(rec[9], 64)
+					pop = uint64(p)
+				}
+				dm.geo.cities = append(dm.geo.cities, CityInfo{Lat: float32(lat), Lng: float32(lng), Population: pop})
+
 				dm.geo.cityCoords[cityKey{city: cityName, cc: cc}] = [2]float32{float32(lat), float32(lng)}
 				dm.geo.cityCoords[cityKey{city: cityName, cc: countryName}] = [2]float32{float32(lat), float32(lng)}
 				dm.geo.citiesByCountry[cc] = append(dm.geo.citiesByCountry[cc], cityName)
@@ -96,6 +111,8 @@ func (dm *DataManager) LoadWorldCities() {
 				cc := strings.ToUpper(rec[6])
 				countryName := strings.ToUpper(rec[7])
 				cityName := strings.ToLower(rec[1])
+				dm.geo.cities = append(dm.geo.cities, CityInfo{Lat: float32(lat), Lng: float32(lng), Population: 0})
+
 				dm.geo.cityCoords[cityKey{city: cityName, cc: cc}] = [2]float32{float32(lat), float32(lng)}
 				dm.geo.cityCoords[cityKey{city: cityName, cc: countryName}] = [2]float32{float32(lat), float32(lng)}
 				dm.geo.citiesByCountry[cc] = append(dm.geo.citiesByCountry[cc], cityName)

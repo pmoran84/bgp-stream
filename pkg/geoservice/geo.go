@@ -31,6 +31,11 @@ type CityHub struct {
 	CumulativeWeight float64
 }
 
+type CityInfo struct {
+	Lat, Lng   float32
+	Population uint64
+}
+
 type GeoMetrics struct {
 	CacheHits    atomic.Uint64
 	CustomHits   atomic.Uint64
@@ -60,6 +65,7 @@ type GeoService struct {
 	dataMu            sync.RWMutex
 	prefixData        PrefixData
 	hubsData          PrefixData
+	cities            []CityInfo
 	cityCoords        map[cityKey][2]float32
 	countryCoords     map[string][2]float32
 	citiesByCountry   map[string][]string
@@ -93,6 +99,7 @@ func NewGeoService(width, height int, scale float64) *GeoService {
 		cityMatchers:      make(map[string]*ahocorasick.Matcher),
 		isoToCountry:      make(map[string]string),
 		countryToISO:      make(map[string]string),
+		cities:            make([]CityInfo, 0),
 	}
 }
 
@@ -839,6 +846,12 @@ func (g *GeoService) GetCountryCoords() map[string][2]float32 {
 
 func (g *GeoService) GetCountryHubs() map[string][]CityHub {
 	return g.countryHubs
+}
+
+func (g *GeoService) GetCities() []CityInfo {
+	g.dataMu.RLock()
+	defer g.dataMu.RUnlock()
+	return g.cities
 }
 
 func (g *GeoService) Project(lat, lng float64) (x, y float64) {

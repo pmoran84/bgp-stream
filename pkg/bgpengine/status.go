@@ -40,33 +40,24 @@ func (e *Engine) DrawBGPStatus(screen *ebiten.Image) {
 		boxW = 560.0
 	}
 
-	// 1. Left Column: BGP Anomalies (Summary & Stream)
-	// Positioned lower to avoid covering the central part of the map
-	leftBaselineY := float64(e.Height) * 0.55
+	// 1. Left Column: Critical Event Stream
+	// Positioned starting halfway down the map
+	streamY := float64(e.Height) * 0.50
 	if e.Width > 2000 {
-		leftBaselineY = float64(e.Height) * 0.50
+		streamY = float64(e.Height) * 0.50
 	}
 
-	// 1a. Anomaly Summary (Top Left)
-	summaryH := e.calculateSummaryBoxHeight(fontSize)
-	e.drawAnomalySummary(screen, margin, leftBaselineY, boxW, summaryH, fontSize)
-
-	// 1b. Critical Event Stream (Below Summary)
 	if len(e.CriticalStream) > 0 {
-		streamY := leftBaselineY + summaryH + 20.0
-		if e.Width > 2000 {
-			streamY = leftBaselineY + summaryH + 40.0
-		}
 		// Extend to near the bottom of the view
-		maxStreamH := float64(e.Height) - 20.0 - streamY
+		maxStreamH := float64(e.Height) - margin - streamY
 		streamH := e.calculateStreamBoxHeight(fontSize, maxStreamH)
-		e.drawCriticalStream(screen, margin, streamY, boxW+60, streamH, fontSize)
+		e.drawCriticalStream(screen, margin+10, streamY, boxW+20, streamH, fontSize)
 	}
 
 	// 3. Bottom Center: Now Playing
 	e.drawNowPlaying(screen, margin, boxW, fontSize, e.face)
 
-	// 4. Bottom Right: Legend & Trendlines
+	// 4. Bottom Right: Legend, Anomaly Summary & Trendlines
 	e.drawLegendAndTrends(screen)
 }
 
@@ -84,21 +75,22 @@ func (e *Engine) calculateSummaryBoxHeight(fontSize float64) float64 {
 	return totalHeight
 }
 
-func (e *Engine) drawAnomalySummary(screen *ebiten.Image, margin, yBase, boxW, boxH, fontSize float64) {
-	if e.impactBuffer == nil || e.impactBuffer.Bounds().Dx() != int(boxW*1.4) || e.impactBuffer.Bounds().Dy() != int(boxH) {
-		e.impactBuffer = ebiten.NewImage(int(boxW*1.4), int(boxH))
+func (e *Engine) drawAnomalySummary(screen *ebiten.Image, xBase, yBase, boxW, boxH, fontSize float64) {
+	// boxW is already scaled by 1.4 in the caller
+	scaledBoxW := boxW * 1.4
+	if e.impactBuffer == nil || e.impactBuffer.Bounds().Dx() != int(scaledBoxW) || e.impactBuffer.Bounds().Dy() != int(boxH) {
+		e.impactBuffer = ebiten.NewImage(int(scaledBoxW), int(boxH))
 		e.impactDirty = true
 	}
 
 	if e.impactDirty {
 		e.impactBuffer.Clear()
 
-		boxW *= 1.4
 		localX, localY := 10.0, fontSize+15.0
-		vector.FillRect(e.impactBuffer, 0, 0, float32(boxW), float32(boxH), color.RGBA{0, 0, 0, 100}, false)
-		vector.StrokeRect(e.impactBuffer, 0, 0, float32(boxW), float32(boxH), 1, color.RGBA{36, 42, 53, 255}, false)
+		vector.FillRect(e.impactBuffer, 0, 0, float32(scaledBoxW), float32(boxH), color.RGBA{0, 0, 0, 100}, false)
+		vector.StrokeRect(e.impactBuffer, 0, 0, float32(scaledBoxW), float32(boxH), 1, color.RGBA{36, 42, 53, 255}, false)
 
-		impactTitle := "BGP ANOMALY SUMMARY (last 20s)"
+		impactTitle := "NETWORK SECURITY & STABILITY SUMMARY"
 		vector.FillRect(e.impactBuffer, 0, 0, 4, float32(fontSize+10), ColorNew, false)
 
 		textOp := &text.DrawOptions{}
@@ -114,14 +106,14 @@ func (e *Engine) drawAnomalySummary(screen *ebiten.Image, margin, yBase, boxW, b
 			text.Draw(e.impactBuffer, "Crunching the numbers, please wait...", e.subMonoFace, textOp)
 		} else {
 			currentY := localY + 5.0
-			// Layout: [ANOMALY NAME] [RATE] [ASNS] [PFXS]
-			col1X := localX + 5.0
-			col4X := localX + boxW - 40.0
+			// Layout: [ICON] [ANOMALY NAME] [RATE] [ASNS] [PFXS]
+			col1X := localX + 5.0 + (fontSize * 1.2)
+			col4X := localX + scaledBoxW - 40.0
 			col3X := col4X - 60.0
 			col2X := col3X - 80.0
 
 			if e.Width > 2000 {
-				col4X = localX + boxW - 80.0
+				col4X = localX + scaledBoxW - 80.0
 				col3X = col4X - 120.0
 				col2X = col3X - 160.0
 			}
@@ -156,32 +148,81 @@ func (e *Engine) drawAnomalySummary(screen *ebiten.Image, margin, yBase, boxW, b
 
 			for i := range e.prefixCounts {
 				pc := &e.prefixCounts[i]
+
+				// Draw Swatch/Icon
+				mapCol, _ := e.getClassificationVisuals(pc.Type)
+				imgToDraw := e.pulseImage
+				if pc.Name == nameRouteLeak {
+					imgToDraw = e.flareImage
+				}
+
+				swatchSize := fontSize * 0.8
+				cr, cg, cb := float32(mapCol.R)/255.0, float32(mapCol.G)/255.0, float32(mapCol.B)/255.0
+				baseAlpha := float32(0.6)
+				if pc.Name == nameRouteLeak {
+					baseAlpha = 1.0
+				}
+				if pc.Count == 0 {
+					baseAlpha *= 0.3
+				}
+
+				imgWidth := float64(imgToDraw.Bounds().Dx())
+				halfWidth := imgWidth / 2
+				op := &ebiten.DrawImageOptions{}
+				op.Blend = ebiten.BlendLighter
+				scale := swatchSize / imgWidth
+				op.GeoM.Translate(-halfWidth, -halfWidth)
+				op.GeoM.Scale(scale, scale)
+				op.GeoM.Translate(localX+5+(swatchSize/2), currentY+(fontSize/2))
+				op.ColorScale.Scale(cr*baseAlpha, cg*baseAlpha, cb*baseAlpha, baseAlpha)
+				e.impactBuffer.DrawImage(imgToDraw, op)
+
 				// Anomaly Name
 				textOp.GeoM.Reset()
-				textOp.GeoM.Translate(localX+5, currentY)
+				textOp.GeoM.Translate(col1X, currentY)
 				textOp.ColorScale.Reset()
-				textOp.ColorScale.ScaleWithColor(pc.Color)
+				if pc.Count > 0 {
+					textOp.ColorScale.ScaleWithColor(pc.Color)
+				} else {
+					textOp.ColorScale.ScaleWithColor(pc.Color)
+					textOp.ColorScale.Scale(0.5, 0.5, 0.5, 0.1) // Much more faded
+				}
 				text.Draw(e.impactBuffer, pc.Name, e.subMonoFace, textOp)
 
 				// Rate
 				textOp.GeoM.Reset()
 				textOp.GeoM.Translate(col2X-pc.RateWidth/2, currentY)
 				textOp.ColorScale.Reset()
-				textOp.ColorScale.ScaleWithColor(pc.Color)
+				if pc.Count > 0 {
+					textOp.ColorScale.ScaleWithColor(pc.Color)
+				} else {
+					textOp.ColorScale.ScaleWithColor(pc.Color)
+					textOp.ColorScale.Scale(0.5, 0.5, 0.5, 0.1)
+				}
 				text.Draw(e.impactBuffer, pc.RateStr, e.subMonoFace, textOp)
 
 				// ASN Count
 				textOp.GeoM.Reset()
 				textOp.GeoM.Translate(col3X-pc.ASNWidth/2, currentY)
 				textOp.ColorScale.Reset()
-				textOp.ColorScale.ScaleWithColor(pc.Color)
+				if pc.Count > 0 {
+					textOp.ColorScale.ScaleWithColor(pc.Color)
+				} else {
+					textOp.ColorScale.ScaleWithColor(pc.Color)
+					textOp.ColorScale.Scale(0.5, 0.5, 0.5, 0.1)
+				}
 				text.Draw(e.impactBuffer, pc.ASNStr, e.subMonoFace, textOp)
 
 				// Prefix Count
 				textOp.GeoM.Reset()
 				textOp.GeoM.Translate(col4X-pc.CountWidth/2, currentY)
 				textOp.ColorScale.Reset()
-				textOp.ColorScale.ScaleWithColor(pc.Color)
+				if pc.Count > 0 {
+					textOp.ColorScale.ScaleWithColor(pc.Color)
+				} else {
+					textOp.ColorScale.ScaleWithColor(pc.Color)
+					textOp.ColorScale.Scale(0.5, 0.5, 0.5, 0.1)
+				}
 				text.Draw(e.impactBuffer, pc.CountStr, e.subMonoFace, textOp)
 
 				currentY += fontSize * 1.0
@@ -197,7 +238,7 @@ func (e *Engine) drawAnomalySummary(screen *ebiten.Image, margin, yBase, boxW, b
 		intensity = 1.0 - (now.Sub(e.impactUpdatedAt).Seconds() / 1.0)
 	}
 
-	e.drawGlitchImage(screen, e.impactBuffer, margin-10, yBase-fontSize-15, intensity, isGlitching)
+	e.drawGlitchImage(screen, e.impactBuffer, xBase-10, yBase-fontSize-15, intensity, isGlitching)
 }
 
 func (e *Engine) calculateStreamBoxHeight(fontSize, maxHeight float64) float64 {
@@ -206,15 +247,15 @@ func (e *Engine) calculateStreamBoxHeight(fontSize, maxHeight float64) float64 {
 }
 
 func (e *Engine) drawCriticalStream(screen *ebiten.Image, margin, yBase, boxW, boxH, fontSize float64) {
-	if e.streamBuffer == nil || e.streamBuffer.Bounds().Dx() != int(boxW*1.4) || e.streamBuffer.Bounds().Dy() != int(boxH) {
-		e.streamBuffer = ebiten.NewImage(int(boxW*1.4), int(boxH))
+	if e.streamBuffer == nil || e.streamBuffer.Bounds().Dx() != int(boxW*1.1) || e.streamBuffer.Bounds().Dy() != int(boxH) {
+		e.streamBuffer = ebiten.NewImage(int(boxW*1.1), int(boxH))
 		e.streamDirty = true
 	}
 
 	if e.streamDirty {
 		e.streamBuffer.Clear()
 
-		boxW *= 1.4
+		boxW *= 1.1
 		localX, localY := 10.0, fontSize+15.0
 		vector.FillRect(e.streamBuffer, 0, 0, float32(boxW), float32(boxH), color.RGBA{0, 0, 0, 100}, false)
 		vector.StrokeRect(e.streamBuffer, 0, 0, float32(boxW), float32(boxH), 1, color.RGBA{36, 42, 53, 255}, false)
@@ -235,13 +276,18 @@ func (e *Engine) drawCriticalStream(screen *ebiten.Image, margin, yBase, boxW, b
 			text.Draw(e.streamBuffer, "Waiting for critical events...", e.subMonoFace, textOp)
 		} else {
 			currentY := localY + 5.0
-			for _, ce := range e.CriticalStream {
-				if nextY := e.drawCriticalEvent(ce, localX, currentY, boxW, boxH, fontSize); nextY == 0 {
+			for i, ce := range e.CriticalStream {
+				nextY := e.drawCriticalEvent(ce, localX, currentY, boxW, boxH, fontSize)
+				if nextY == 0 {
 					break
-				} else {
-					currentY = nextY
 				}
-				currentY += 10.0 // Spacer between events
+
+				// Draw a subtle separator if not the last one
+				if i < len(e.CriticalStream)-1 && nextY+12 < boxH {
+					vector.StrokeLine(e.streamBuffer, float32(localX+10), float32(nextY+10), float32(boxW-10), float32(nextY+10), 1, color.RGBA{255, 255, 255, 15}, false)
+				}
+
+				currentY = nextY + 25.0 // Increased spacer
 			}
 		}
 		e.streamDirty = false
@@ -263,30 +309,39 @@ func (e *Engine) drawCriticalEvent(ce *CriticalEvent, x, y, boxW, boxH, fontSize
 	}
 
 	textOp := &text.DrawOptions{}
-	// Draw Anomaly Type Label
+	// Draw Anomaly Type Label (e.g. [OUTAGE])
 	textOp.GeoM.Translate(x, y)
-	cr, cg, cb := float32(ce.Color.R)/255.0, float32(ce.Color.G)/255.0, float32(ce.Color.B)/255.0
+	cr, cg, cb := float32(ce.UIColor.R)/255.0, float32(ce.UIColor.G)/255.0, float32(ce.UIColor.B)/255.0
 	textOp.ColorScale.Scale(cr, cg, cb, 0.9)
 	text.Draw(e.streamBuffer, ce.CachedTypeLabel, e.subMonoFace, textOp)
 
-	// Draw ASN (or Leak Type if it's a route leak)
+	// Draw details next to the label
 	textOp.GeoM.Reset()
 	textOp.GeoM.Translate(x+ce.CachedTypeWidth+10, y)
-	textOp.ColorScale.Reset()
-	textOp.ColorScale.Scale(1, 1, 1, 0.8)
+
+	// Use a distinct color for sub-classifications (Route Leak types) or Impact
+	if ce.Anom == nameRouteLeak || ce.Anom == nameHardOutage {
+		textOp.ColorScale.Reset()
+		textOp.ColorScale.Scale(0, 1, 1, 0.9) // Cyan for sub-type or impact
+	} else {
+		textOp.ColorScale.Reset()
+		textOp.ColorScale.Scale(cr, cg, cb, 0.7) // Lightened version of base color
+	}
 
 	// Calculate available width for the first line
 	firstLineX := x + ce.CachedTypeWidth + 10
 	availableW := boxW - firstLineX - 5
 	nextY := e.drawWrappedText(e.streamBuffer, ce.CachedFirstLine, e.subMonoFace, firstLineX, y, availableW, fontSize, textOp)
 
+	// Use Yellow for extra details
+	textOp.ColorScale.Reset()
+	textOp.ColorScale.Scale(1, 1, 0, 0.8) // Yellow
+
 	// Details for Route Leaks
 	if ce.Anom == nameRouteLeak && ce.LeakType != LeakUnknown {
 		if nextY+fontSize > boxH {
 			return 0
 		}
-		textOp.ColorScale.Reset()
-		textOp.ColorScale.Scale(1, 0.8, 0, 0.7) // Golden yellow
 
 		indent := 20.0
 		// Leaker
@@ -297,22 +352,42 @@ func (e *Engine) drawCriticalEvent(ce *CriticalEvent, x, y, boxW, boxH, fontSize
 			return 0
 		}
 		nextY = e.drawWrappedText(e.streamBuffer, ce.CachedVictimStr, e.subMonoFace, x+indent, nextY, boxW-indent-5, fontSize, textOp)
-	} else if ce.Anom == nameHardOutage && ce.CachedLocationStr != "" {
+	} else if ce.Anom == nameHardOutage {
 		if nextY+fontSize > boxH {
 			return 0
 		}
-		textOp.ColorScale.Reset()
-		textOp.ColorScale.Scale(1, 0.8, 0, 0.7) // Golden yellow
 
 		indent := 20.0
-		nextY = e.drawWrappedText(e.streamBuffer, ce.CachedLocationStr, e.subMonoFace, x+indent, nextY, boxW-indent-5, fontSize, textOp)
+		// Impacted ASN line
+		nextY = e.drawWrappedText(e.streamBuffer, ce.CachedASNStr, e.subMonoFace, x+indent, nextY, boxW-indent-5, fontSize, textOp)
 
-		if ce.CachedImpactStr != "" {
+		// Networks line
+		if nextY+fontSize > boxH {
+			return 0
+		}
+		nextY = e.drawWrappedText(e.streamBuffer, ce.CachedNetworksStr, e.subMonoFace, x+indent, nextY, boxW-indent-5, fontSize, textOp)
+
+		// Locations line
+		if ce.CachedLocationStr != "" {
 			if nextY+fontSize > boxH {
 				return 0
 			}
-			nextY = e.drawWrappedText(e.streamBuffer, ce.CachedImpactStr, e.subMonoFace, x+indent, nextY, boxW-indent-5, fontSize, textOp)
+			nextY = e.drawWrappedText(e.streamBuffer, ce.CachedLocationStr, e.subMonoFace, x+indent, nextY, boxW-indent-5, fontSize, textOp)
 		}
+	} else if ce.Anom == nameDDoSMitigation {
+		if nextY+fontSize > boxH {
+			return 0
+		}
+
+		indent := 20.0
+		// Provider
+		nextY = e.drawWrappedText(e.streamBuffer, ce.CachedLeakerStr, e.subMonoFace, x+indent, nextY, boxW-indent-5, fontSize, textOp)
+
+		// Impacted
+		if nextY+fontSize > boxH {
+			return 0
+		}
+		nextY = e.drawWrappedText(e.streamBuffer, ce.CachedVictimStr, e.subMonoFace, x+indent, nextY, boxW-indent-5, fontSize, textOp)
 	}
 
 	return nextY
@@ -383,21 +458,26 @@ func (e *Engine) drawLegendAndTrends(screen *ebiten.Image) {
 		margin, fontSize = 80.0, 36.0
 	}
 
-	// 3. Bottom Right: Legend & Trendlines
-	var graphW, legendW, legendH float64
+	// 4. Bottom Right: Summary & Trendlines
+	var graphW, legendH float64
+	boxW := 280.0
 	if e.Width > 2000 {
 		graphW = 600.0
-		legendW, legendH = 1300.0, 300.0
+		legendH = 300.0
+		boxW = 560.0
 	} else {
 		graphW = 300.0
-		legendW, legendH = 900.0, 150.0
+		legendH = 150.0
 	}
+
+	summaryW := boxW * 1.4
+	summaryH := e.calculateSummaryBoxHeight(fontSize)
 
 	// Match heights
 	trendBoxH := legendH - fontSize - 25 // Calculate inner graph height area to match legend box height
 	graphH := trendBoxH - 10             // Leave some room inside
 
-	// Calculate positions: Legend on far left, Trendlines box (containing graph + rates) on right
+	// Calculate positions: Summary, Trendlines box, Beacon
 	spacing := 40.0
 	beaconW := 220.0
 	if e.Width > 2000 {
@@ -408,109 +488,21 @@ func (e *Engine) drawLegendAndTrends(screen *ebiten.Image) {
 	if e.Width > 2000 {
 		trendBoxW = graphW + 120.0
 	}
-	// Each box has a width: legendW, trendBoxW+20, beaconW
-	totalW := legendW + spacing + (trendBoxW + 20) + spacing + beaconW
+
+	totalW := summaryW + spacing + (trendBoxW + 20) + spacing + beaconW
 	baseX := float64(e.Width) - margin - totalW
 	baseY := float64(e.Height) - margin - graphH - 10
 
-	firehoseX := baseX
-	firehoseY := baseY
-	gx := baseX + legendW + spacing
+	summaryX := baseX
+	gx := summaryX + summaryW + spacing
 	gy := baseY
 
 	// Draw Beacon Analysis Box
-	beaconX := gx + trendBoxW + 20 + spacing // Gap between (gx-10+trendBoxW+20) and (beaconX-10) should be exactly spacing
+	beaconX := gx + trendBoxW + 20 + spacing
 	e.drawBeaconMetrics(screen, beaconX, gy, beaconW, graphH, fontSize, legendH)
 
-	// Draw Legend Box
-	vector.FillRect(screen, float32(firehoseX-10), float32(firehoseY-fontSize-15), float32(legendW), float32(legendH), color.RGBA{0, 0, 0, 100}, false)
-	vector.StrokeRect(screen, float32(firehoseX-10), float32(firehoseY-fontSize-15), float32(legendW), float32(legendH), 1, color.RGBA{36, 42, 53, 255}, false)
-
-	legendTitle := "LEGEND"
-
-	// Draw subtle hacker-green accent
-	vector.FillRect(screen, float32(firehoseX-10), float32(firehoseY-fontSize-15), 4, float32(fontSize+10), ColorNew, false)
-
-	textOp := &text.DrawOptions{}
-	textOp.GeoM.Translate(firehoseX+5, firehoseY-fontSize-5)
-	textOp.ColorScale.Scale(1, 1, 1, 0.5)
-	text.Draw(screen, legendTitle, e.titleFace, textOp)
-
-	swatchSize := fontSize
-
-	// Shift legend content slightly for padding
-	firehoseX += 10
-	firehoseY += 10
-
-	hLen := len(e.history)
-	getRate := func(idx int, getValue func(s MetricSnapshot) int) float64 {
-		if hLen < 2 || idx < 0 || idx >= hLen {
-			return 0
-		}
-		// Snaps were 1s apart, so interval is 1.0
-		return float64(getValue(e.history[idx])) / 1.0
-	}
-
-	// Calculate interpolated rates based on what's currently at the right edge of the graph
-	for i := range e.legendRows {
-		// Use the stable rate from the previous snapshot (1s ago)
-		// to prevent the numbers from spinning/flickering.
-		e.legendRows[i].val = getRate(hLen-2, e.legendRows[i].accessor)
-	}
-
-	// Draw Legend columns
-	colWidth := (legendW - 60) / 3
-	for i, r := range e.legendRows {
-		var col, row int
-		switch {
-		case i < 4: // Normal (Discovery, Churn, Hunting, Oscill)
-			col = 0
-			row = i
-		case i < 7: // Bad (Flaps, NH, Agg)
-			col = 1
-			row = i - 4
-		default: // Critical (Leak, Outage)
-			col = 2
-			row = i - 7
-		}
-
-		x := firehoseX + float64(col)*colWidth
-		y := firehoseY + float64(row)*(fontSize+10)
-
-		// Draw the pulse circle (swatch) - using the map color (col)
-		cr, cg, cb := float32(r.col.R)/255.0, float32(r.col.G)/255.0, float32(r.col.B)/255.0
-		baseAlpha := float32(0.6)
-		if r.col == ColorDiscovery {
-			baseAlpha = 0.4
-		}
-
-		imgToDraw := e.pulseImage
-		imgWidth := float64(e.pulseImage.Bounds().Dx())
-		halfWidth := imgWidth / 2
-		if r.label == "ROUTE LEAK" {
-			imgToDraw = e.flareImage
-			imgWidth = float64(e.flareImage.Bounds().Dx())
-			halfWidth = imgWidth / 2
-			baseAlpha = 1.0 // Make it fully visible in legend
-		}
-
-		op := &ebiten.DrawImageOptions{}
-		op.Blend = ebiten.BlendLighter
-		scale := swatchSize / imgWidth * 1
-		op.GeoM.Translate(-halfWidth, -halfWidth)
-		op.GeoM.Scale(scale, scale)
-		op.GeoM.Translate(x+(swatchSize/2), y+(fontSize/2))
-		op.ColorScale.Scale(cr*baseAlpha, cg*baseAlpha, cb*baseAlpha, baseAlpha)
-		screen.DrawImage(imgToDraw, op)
-
-		// Draw the text label in the legend box
-		tr, tg, tb := float32(r.uiCol.R)/255.0, float32(r.uiCol.G)/255.0, float32(r.uiCol.B)/255.0
-		textOp.GeoM.Reset()
-		textOp.GeoM.Translate(x+swatchSize+15, y)
-		textOp.ColorScale.Reset()
-		textOp.ColorScale.Scale(tr, tg, tb, 0.9)
-		text.Draw(screen, r.label, e.face, textOp)
-	}
+	// Draw Anomaly Summary (Shifted up 100px)
+	e.drawAnomalySummary(screen, summaryX, gy-100, boxW, summaryH, fontSize)
 
 	// Draw Trendlines Box
 	e.drawTrendlines(screen, gx, gy, graphW, trendBoxW, graphH, fontSize, legendH)
@@ -602,7 +594,7 @@ func (e *Engine) aggregateMetrics(s *MetricSnapshot) (good, poly, bad, crit int)
 	// Normal (Blue)
 	good = s.Global
 	// Policy (Purple)
-	poly = s.Hunting + s.TE + s.Oscill
+	poly = s.Hunting + s.TE + s.Oscill + s.DDoS
 	// Bad (Orange)
 	bad = s.LinkFlap + s.AggFlap + s.NextHop
 	// Critical (Red)
@@ -823,6 +815,7 @@ func (e *Engine) updateMetricSnapshots(interval float64) {
 		Outage:   int(e.windowOutage),
 		Leak:     int(e.windowLeak),
 		Global:   int(e.windowGlobal),
+		DDoS:     int(e.windowDDoS),
 	}
 	e.rateNew, e.rateUpd, e.rateWith, e.rateGossip = float64(snap.New)/interval, float64(snap.Upd)/interval, float64(snap.With)/interval, float64(snap.Gossip)/interval
 	e.rateNote, e.ratePeer, e.rateOpen = float64(snap.Note)/interval, float64(snap.Peer)/interval, float64(snap.Open)/interval
@@ -842,7 +835,7 @@ func (e *Engine) updateMetricSnapshots(interval float64) {
 
 	e.windowLinkFlap, e.windowAggFlap, e.windowOscill = 0, 0, 0
 	e.windowHunting, e.windowTE, e.windowNextHop, e.windowOutage = 0, 0, 0, 0
-	e.windowLeak, e.windowGlobal = 0, 0
+	e.windowLeak, e.windowGlobal, e.windowDDoS = 0, 0, 0
 }
 
 func (e *Engine) updateVisualHubs(uiInterval float64, firstRun bool) {
@@ -1012,34 +1005,54 @@ func (e *Engine) updatePrefixCounts(allImpact []*VisualImpact) {
 	}
 	clear(e.asnsPerClass)
 
-	for _, vi := range allImpact {
-		if vi.ClassificationName == "" {
-			continue
-		}
-		prio := e.GetPriority(vi.ClassificationName)
-		asn := e.prefixToASN[vi.Prefix]
+	// Pre-populate countMap with all classification types to ensure they always show
+	allClasses := []ClassificationType{
+		ClassificationRouteLeak,
+		ClassificationOutage,
+		ClassificationLinkFlap,
+		ClassificationNextHopOscillation,
+		ClassificationAggFlap,
+		ClassificationPolicyChurn,
+		ClassificationDDoSMitigation,
+		ClassificationPathLengthOscillation,
+		ClassificationPathHunting,
+		ClassificationDiscovery,
+	}
 
-		if pc, ok := e.countMap[vi.ClassificationName]; ok {
-			pc.Count++
-			pc.Rate += vi.Count
-		} else {
-			e.countMap[vi.ClassificationName] = &PrefixCount{
-				Name:     vi.ClassificationName,
-				Count:    1,
-				Rate:     vi.Count,
-				Color:    e.getClassificationUIColor(vi.ClassificationName),
-				Priority: prio,
+	for _, ct := range allClasses {
+		name := ct.String()
+		prio := e.GetPriority(name)
+		e.countMap[name] = &PrefixCount{
+			Name:     name,
+			Count:    0,
+			Rate:     0,
+			Color:    e.getClassificationUIColor(name),
+			Priority: prio,
+			Type:     ct,
+		}
+	}
+
+	if allImpact != nil {
+		for _, vi := range allImpact {
+			if vi.ClassificationName == "" {
+				continue
 			}
-		}
+			asn := e.prefixToASN[vi.Prefix]
 
-		// Track ASNs per classification. If ASN is unknown (0), we still track it as a unique
-		// entry to ensure ASNCount is at least 1 when Prefixes are present.
-		m, ok := e.asnsPerClass[vi.ClassificationName]
-		if !ok {
-			m = make(map[uint32]struct{})
-			e.asnsPerClass[vi.ClassificationName] = m
+			if pc, ok := e.countMap[vi.ClassificationName]; ok {
+				pc.Count++
+				pc.Rate += vi.Count
+			}
+
+			// Track ASNs per classification. If ASN is unknown (0), we still track it as a unique
+			// entry to ensure ASNCount is at least 1 when Prefixes are present.
+			m, ok := e.asnsPerClass[vi.ClassificationName]
+			if !ok {
+				m = make(map[uint32]struct{})
+				e.asnsPerClass[vi.ClassificationName] = m
+			}
+			m[asn] = struct{}{}
 		}
-		m[asn] = struct{}{}
 	}
 
 	e.prefixCounts = e.prefixCounts[:0]

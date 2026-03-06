@@ -17,7 +17,7 @@ import (
 	"github.com/sudorandom/bgp-stream/pkg/utils"
 )
 
-type BGPEventCallback func(lat, lng float64, cc, city string, eventType EventType, classificationType ClassificationType, prefix string, asn uint32, leakDetail ...*LeakDetail)
+type BGPEventCallback func(lat, lng float64, cc, city string, eventType EventType, classificationType ClassificationType, prefix string, asn, historicalASN uint32, leakDetail ...*LeakDetail)
 type IPCoordsProvider func(ip uint32) (float64, float64, string, string, geoservice.ResolutionType)
 type PrefixToIPConverter func(p string) uint32
 type TimeProvider func() time.Time
@@ -129,7 +129,7 @@ func (p *BGPProcessor) runWorker(w *processorWorker) {
 			events := p.handleRISMessage(w, data)
 			for _, e := range events {
 				if lat, lng, cc, city, _ := p.geo(e.IP); cc != "" {
-					p.onEvent(lat, lng, cc, city, e.EventType, e.ClassificationType, e.Prefix, e.ASN, e.LeakDetail)
+					p.onEvent(lat, lng, cc, city, e.EventType, e.ClassificationType, e.Prefix, e.ASN, e.HistoricalASN, e.LeakDetail)
 				}
 			}
 		case <-ticker.C:
@@ -143,7 +143,7 @@ func (p *BGPProcessor) processWorkerWithdrawals(w *processorWorker) {
 	for ip, entry := range w.pendingWithdrawals {
 		if now.After(entry.Time) {
 			if lat, lng, cc, city, _ := p.geo(ip); cc != "" {
-				p.onEvent(lat, lng, cc, city, EventWithdrawal, ClassificationNone, entry.Prefix, 0, nil)
+				p.onEvent(lat, lng, cc, city, EventWithdrawal, ClassificationNone, entry.Prefix, 0, 0, nil)
 				w.recentlySeen.Add(ip, struct {
 					Time time.Time
 					Type EventType
@@ -255,6 +255,7 @@ type PendingEvent struct {
 	IP                 uint32
 	Prefix             string
 	ASN                uint32
+	HistoricalASN      uint32
 	EventType          EventType
 	ClassificationType ClassificationType
 	LeakDetail         *LeakDetail

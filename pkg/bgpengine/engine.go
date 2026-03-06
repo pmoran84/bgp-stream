@@ -92,19 +92,21 @@ var (
 	ColorCritical  = color.RGBA{255, 0, 0, 255}   // Pure Red (Critical)
 
 	// Keep specific pulse colors for variety but group by tier color in legend
-	ColorLinkFlap = color.RGBA{255, 127, 0, 255}
-	ColorOutage   = color.RGBA{255, 50, 50, 255}
-	ColorLeak     = color.RGBA{255, 0, 0, 255}
-	ColorNextHop  = color.RGBA{218, 165, 32, 255}
-	ColorAggFlap  = color.RGBA{255, 140, 0, 255}
-	ColorOscill   = color.RGBA{148, 0, 211, 255}
-	ColorHunting  = color.RGBA{148, 0, 211, 255}
+	ColorLinkFlap       = color.RGBA{255, 127, 0, 255}
+	ColorOutage         = color.RGBA{255, 50, 50, 255}
+	ColorLeak           = color.RGBA{255, 0, 0, 255}
+	ColorNextHop        = color.RGBA{218, 165, 32, 255}
+	ColorAggFlap        = color.RGBA{255, 140, 0, 255}
+	ColorOscill         = color.RGBA{148, 0, 211, 255}
+	ColorHunting        = color.RGBA{148, 0, 211, 255}
+	ColorDDoSMitigation = color.RGBA{148, 0, 211, 255} // Deep Violet/Purple (Policy)
 
 	// Lighter versions for UI text and trendlines
-	ColorGossipUI = color.RGBA{135, 206, 250, 255} // Light Sky Blue
-	ColorNewUI    = color.RGBA{152, 255, 152, 255} // Light Green
-	ColorUpdUI    = color.RGBA{218, 112, 214, 255} // Orchid (Lighter Purple)
-	ColorWithUI   = color.RGBA{255, 127, 127, 255} // Light Red
+	ColorGossipUI         = color.RGBA{135, 206, 250, 255} // Light Sky Blue
+	ColorNewUI            = color.RGBA{152, 255, 152, 255} // Light Green
+	ColorUpdUI            = color.RGBA{218, 112, 214, 255} // Orchid (Lighter Purple)
+	ColorWithUI           = color.RGBA{255, 127, 127, 255} // Light Red
+	ColorDDoSMitigationUI = color.RGBA{218, 112, 214, 255} // Orchid (Lighter Purple)
 
 	ColorNote = color.RGBA{255, 255, 255, 255} // White
 	ColorPeer = color.RGBA{255, 255, 0, 255}   // Yellow
@@ -136,6 +138,7 @@ type CriticalEvent struct {
 	VictimASN uint32
 	Locations string
 	Color     color.RGBA
+	UIColor   color.RGBA
 
 	ImpactedIPs      uint64
 	ImpactedPrefixes map[string]struct{}
@@ -146,6 +149,8 @@ type CriticalEvent struct {
 	CachedFirstLine   string
 	CachedLeakerStr   string
 	CachedVictimStr   string
+	CachedASNStr      string
+	CachedNetworksStr string
 	CachedLocationStr string
 	CachedImpactStr   string
 }
@@ -185,7 +190,7 @@ type Engine struct {
 
 	windowLinkFlap, windowAggFlap, windowOscill          int64
 	windowHunting, windowTE, windowNextHop, windowOutage int64
-	windowLeak, windowGlobal                             int64
+	windowLeak, windowGlobal, windowDDoS                 int64
 
 	rateNew, rateUpd, rateWith, rateGossip float64
 	rateNote, ratePeer, rateOpen           float64
@@ -320,6 +325,7 @@ type bgpEvent struct {
 	classificationType ClassificationType
 	prefix             string
 	asn                uint32
+	historicalASN      uint32
 	leakDetail         *LeakDetail
 }
 
@@ -338,6 +344,7 @@ type VisualHub struct {
 
 type PrefixCount struct {
 	Name     string
+	Type     ClassificationType
 	Count    int
 	CountStr string
 	ASNCount int
@@ -397,9 +404,9 @@ type MetricSnapshot struct {
 	New, Upd, With, Gossip, Note, Peer, Open int
 	Beacon                                   int
 
-	LinkFlap, AggFlap, Oscill         int
-	Hunting, TE, NextHop, Outage      int
-	Leak, Attr, Global, Dedupe, Uncat int
+	LinkFlap, AggFlap, Oscill               int
+	Hunting, TE, NextHop, Outage            int
+	Leak, Attr, Global, DDoS, Dedupe, Uncat int
 }
 
 type asnGroup struct {
@@ -513,10 +520,13 @@ func NewEngine(width, height int, scale float64) *Engine {
 	e.titleFace09 = &text.GoTextFace{Source: s, Size: fontSize * 0.9}
 	e.titleFace05 = &text.GoTextFace{Source: s, Size: fontSize * 0.5}
 
+	e.updatePrefixCounts(nil)
+
 	e.legendRows = []legendRow{
 		// Column 1: Normal (Blue/Purple)
 		{"DISCOVERY", 0, ColorDiscovery, ColorGossipUI, func(s MetricSnapshot) int { return s.Global }},
 		{"POLICY CHURN", 0, ColorPolicy, ColorUpdUI, func(s MetricSnapshot) int { return s.TE }},
+		{"DDOS MITIGATION", 0, ColorDDoSMitigation, ColorDDoSMitigationUI, func(s MetricSnapshot) int { return s.DDoS }},
 		{"PATH HUNTING", 0, ColorPolicy, ColorUpdUI, func(s MetricSnapshot) int { return s.Hunting }},
 		{"PATH OSCILLATION", 0, ColorPolicy, ColorUpdUI, func(s MetricSnapshot) int { return s.Oscill }},
 
@@ -702,6 +712,9 @@ func (e *Engine) generateBackground() error {
 		return err
 	}
 
+	// Bake cities into the CPU image
+	e.drawCitiesCPU(cpuImg)
+
 	e.bgImage = ebiten.NewImageFromImage(cpuImg)
 	log.Printf("Background map generated in %v", time.Since(start))
 
@@ -756,6 +769,100 @@ func (e *Engine) drawFeatures(cpuImg *image.RGBA) error {
 	return nil
 }
 
+func (e *Engine) drawCitiesCPU(img *image.RGBA) {
+	cities := e.geo.GetCities()
+	drawnCount := 0
+
+	// Track some stats for debugging
+	popSum := uint64(0)
+
+	for _, c := range cities {
+		x, y := e.geo.Project(float64(c.Lat), float64(c.Lng))
+		ix, iy := int(x), int(y)
+		if ix < 1 || ix >= e.Width-2 || iy < 1 || iy >= e.Height-2 {
+			continue
+		}
+
+		logPop := 0.0
+		if c.Population > 0 {
+			logPop = math.Log10(float64(c.Population))
+			popSum += c.Population
+		} else {
+			continue
+		}
+		drawnCount++
+
+		// High alpha for visibility: 180 to 255
+		alpha := uint32(180 + (logPop * 10))
+		if alpha > 255 {
+			alpha = 255
+		}
+
+		// Bright warm-white
+		cr, cg, cb := uint32(255), uint32(250), uint32(220)
+
+		// 1. Draw a dense 3x3 core for ALL cities to ensure visibility on high-res displays
+		for dx := -1; dx <= 1; dx++ {
+			for dy := -1; dy <= 1; dy++ {
+				e.setPixelCPU(img, ix+dx, iy+dy, cr, cg, cb, alpha)
+			}
+		}
+
+		// 2. Larger cities (> 100k) get a 5x5 bloom
+		if logPop > 5.0 {
+			dimAlpha := alpha / 2
+			for dx := -2; dx <= 2; dx++ {
+				for dy := -2; dy <= 2; dy++ {
+					if (dx >= -1 && dx <= 1) && (dy >= -1 && dy <= 1) {
+						continue
+					}
+					e.setPixelCPU(img, ix+dx, iy+dy, cr, cg, cb, dimAlpha)
+				}
+			}
+		}
+
+		// 3. Megacities (> 5m) get a 7x7 outer glow
+		if logPop > 6.7 {
+			glowAlpha := alpha / 4
+			for dx := -3; dx <= 3; dx++ {
+				for dy := -3; dy <= 3; dy++ {
+					if (dx >= -2 && dx <= 2) && (dy >= -2 && dy <= 2) {
+						continue
+					}
+					e.setPixelCPU(img, ix+dx, iy+dy, cr, cg, cb, glowAlpha)
+				}
+			}
+		}
+	}
+	log.Printf("[GEO] Baked %d city lights into CPU background image. Avg pop: %d", drawnCount, popSum/uint64(len(cities)+1))
+}
+
+func (e *Engine) setPixelCPU(img *image.RGBA, x, y int, r, g, b, alpha uint32) {
+	off := y*img.Stride + x*4
+	dr, dg, db := uint32(img.Pix[off+0]), uint32(img.Pix[off+1]), uint32(img.Pix[off+2])
+
+	img.Pix[off+0] = uint8((r*alpha + dr*(255-alpha)) / 255)
+	img.Pix[off+1] = uint8((g*alpha + dg*(255-alpha)) / 255)
+	img.Pix[off+2] = uint8((b*alpha + db*(255-alpha)) / 255)
+	img.Pix[off+3] = 255
+}
+
+func (e *Engine) blendPixel(img *image.RGBA, x, y int, r, g, b, alpha uint32) {
+	if x < 0 || x >= e.Width || y < 0 || y >= e.Height {
+		return
+	}
+	i := img.PixOffset(x, y)
+
+	// Standard Alpha Blending
+	// out = src * alpha + dest * (1 - alpha)
+	dr, dg, db := uint32(img.Pix[i+0]), uint32(img.Pix[i+1]), uint32(img.Pix[i+2])
+
+	img.Pix[i+0] = uint8((r*alpha + dr*(255-alpha)) / 255)
+	img.Pix[i+1] = uint8((g*alpha + dg*(255-alpha)) / 255)
+	img.Pix[i+2] = uint8((b*alpha + db*(255-alpha)) / 255)
+	img.Pix[i+3] = 255
+}
+
 func (e *Engine) cacheBackground(cacheFile string, cpuImg *image.RGBA) {
 	f, err := os.Create(cacheFile)
 	if err != nil {
@@ -778,6 +885,14 @@ func (e *Engine) GenerateInitialBackground() error {
 	if err := os.MkdirAll("data", 0o755); err != nil {
 		log.Printf("Warning: Failed to create data directory: %v", err)
 	}
+
+	// Ensure city data is loaded for background generation
+	if e.dataMgr == nil {
+		e.dataMgr = geoservice.NewDataManager(e.geo)
+	}
+	_ = e.dataMgr.DownloadWorldCities(false)
+	e.dataMgr.LoadWorldCities()
+
 	if err := e.generateBackground(); err != nil {
 		return fmt.Errorf("failed to generate background: %w", err)
 	}
@@ -911,10 +1026,6 @@ func (e *Engine) AddPulse(lat, lng float64, c color.RGBA, count int, isFlare ...
 		baseRad := 6.0
 		if e.Width > 2000 {
 			baseRad = 12.0
-		}
-		// Discovery pulses are smaller
-		if c == ColorDiscovery {
-			baseRad *= 0.65
 		}
 
 		// Use natural log (ln) for slower growth at high counts
@@ -1163,6 +1274,7 @@ func (e *Engine) Draw(screen *ebiten.Image) {
 	} else {
 		e.mapImage.Fill(color.RGBA{8, 10, 15, 255})
 	}
+
 	e.pulsesMu.Lock()
 	now = e.Now()
 	e.drawOp.GeoM.Reset()
@@ -1271,13 +1383,13 @@ func (e *Engine) processEventBatch(batch []*bgpEvent) {
 	}
 }
 
-func (e *Engine) recordEvent(lat, lng float64, cc, city string, eventType EventType, classificationType ClassificationType, prefix string, asn uint32, leakDetail ...*LeakDetail) {
+func (e *Engine) recordEvent(lat, lng float64, cc, city string, eventType EventType, classificationType ClassificationType, prefix string, asn, historicalASN uint32, leakDetail ...*LeakDetail) {
 	var ld *LeakDetail
 	if len(leakDetail) > 0 {
 		ld = leakDetail[0]
 	}
 	select {
-	case e.eventCh <- &bgpEvent{lat, lng, cc, city, eventType, classificationType, prefix, asn, ld}:
+	case e.eventCh <- &bgpEvent{lat, lng, cc, city, eventType, classificationType, prefix, asn, historicalASN, ld}:
 	default:
 		// Drop event if engine is too busy
 	}
@@ -1306,7 +1418,7 @@ func (e *Engine) processEventLocked(ev *bgpEvent) {
 	}
 
 	// Record to CriticalStream if it's a critical anomaly
-	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak {
+	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation {
 		e.recordToCriticalStream(ev, c, name)
 	}
 
@@ -1375,6 +1487,24 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 	// Filter out ASN 0 for outages as requested
 	if ev.classificationType == ClassificationOutage && ev.asn == 0 {
 		return
+	}
+
+	// Filter out DDoS Mitigation if we don't know the impacted ASN
+	if ev.classificationType == ClassificationDDoSMitigation {
+		victimASN := uint32(0)
+		if ev.leakDetail != nil {
+			victimASN = ev.leakDetail.VictimASN
+		}
+		if victimASN == 0 {
+			victimASN = ev.historicalASN
+		}
+		if victimASN == 0 || victimASN == ev.asn {
+			return
+		}
+		// Also check sibling relationship
+		if e.processor != nil && e.processor.workers[0].classifier.isSibling(ev.asn, victimASN) {
+			return
+		}
 	}
 
 	now := time.Now()
@@ -1455,7 +1585,7 @@ func (e *Engine) updateExistingCriticalEvent(ce *CriticalEvent, ev *bgpEvent) bo
 	}
 
 	// Update IP Impact
-	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak {
+	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation {
 		if ce.ImpactedPrefixes == nil {
 			ce.ImpactedPrefixes = make(map[string]struct{})
 		}
@@ -1484,10 +1614,11 @@ func (e *Engine) addNewCriticalEvent(ev *bgpEvent, c color.RGBA, name, asnStr, o
 		ASNStr:           asnStr,
 		OrgID:            orgID,
 		Color:            c,
+		UIColor:          e.getClassificationUIColor(name),
 		Locations:        newLoc,
 		ImpactedPrefixes: make(map[string]struct{}),
 	}
-	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak {
+	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation {
 		ce.ImpactedPrefixes[ev.prefix] = struct{}{}
 		ce.ImpactedIPs = utils.GetPrefixSize(ev.prefix)
 	}
@@ -1510,22 +1641,34 @@ func (e *Engine) updateCriticalEventCacheStrs(ce *CriticalEvent) {
 	ce.CachedTypeLabel = "[" + strings.ToUpper(ce.Anom) + "]"
 	ce.CachedTypeWidth, _ = text.Measure(ce.CachedTypeLabel, e.subMonoFace, 0)
 
-	ce.CachedFirstLine = ce.ASNStr
-	if ce.Anom == nameRouteLeak && ce.LeakType != LeakUnknown {
-		e.cacheLeakStrings(ce)
-	} else if ce.Anom == nameHardOutage && ce.Locations != "" {
+	if ce.Anom == nameHardOutage {
+		ce.CachedFirstLine = fmt.Sprintf(" %s IPs Impacted", utils.FormatNumber(ce.ImpactedIPs))
 		e.cacheOutageStrings(ce)
+	} else {
+		ce.CachedFirstLine = ce.ASNStr
+		if (ce.Anom == nameRouteLeak || ce.Anom == nameDDoSMitigation) && ce.LeakerASN != 0 {
+			e.cacheLeakStrings(ce)
+		}
 	}
 
-	if ce.ImpactedIPs > 0 {
+	if ce.ImpactedIPs > 0 && ce.Anom != nameHardOutage {
 		e.cacheImpactStrings(ce)
 	}
 }
 
 func (e *Engine) cacheLeakStrings(ce *CriticalEvent) {
-	ce.CachedFirstLine = ce.LeakType.String()
+	if ce.Anom == nameRouteLeak {
+		ce.CachedFirstLine = ce.LeakType.String()
+	}
 
-	leakerStr := fmt.Sprintf("  Leaker: AS%d", ce.LeakerASN)
+	leakerLabel := "  Leaker: "
+	victimLabel := "  Impacted: "
+	if ce.Anom == nameDDoSMitigation {
+		leakerLabel = "  Provider: "
+		victimLabel = "  Impacted: "
+	}
+
+	leakerStr := fmt.Sprintf("%sAS%d", leakerLabel, ce.LeakerASN)
 	if e.asnMapping != nil {
 		if n := e.asnMapping.GetName(ce.LeakerASN); n != "" {
 			leakerStr += " - " + n
@@ -1533,9 +1676,9 @@ func (e *Engine) cacheLeakStrings(ce *CriticalEvent) {
 	}
 	ce.CachedLeakerStr = leakerStr
 
-	victimStr := "  Impacted: Unknown"
+	victimStr := victimLabel + "Unknown"
 	if ce.VictimASN != 0 {
-		victimStr = fmt.Sprintf("  Impacted: AS%d", ce.VictimASN)
+		victimStr = fmt.Sprintf("%sAS%d", victimLabel, ce.VictimASN)
 		if e.asnMapping != nil {
 			if n := e.asnMapping.GetName(ce.VictimASN); n != "" {
 				victimStr += " - " + n
@@ -1546,14 +1689,39 @@ func (e *Engine) cacheLeakStrings(ce *CriticalEvent) {
 }
 
 func (e *Engine) cacheOutageStrings(ce *CriticalEvent) {
+	// Impacted ASN line
+	asnStr := "  Impacted: " + ce.ASNStr
+	ce.CachedASNStr = asnStr
+
+	// Networks line
+	networks := make([]string, 0, len(ce.ImpactedPrefixes))
+	for p := range ce.ImpactedPrefixes {
+		networks = append(networks, p)
+	}
+	sort.Strings(networks)
+
+	const maxShow = 2
+	displayNets := networks
+	moreCount := 0
+	if len(networks) > maxShow {
+		displayNets = networks[:maxShow]
+		moreCount = len(networks) - maxShow
+	}
+
+	netStr := "  Networks: " + strings.Join(displayNets, ", ")
+	if moreCount > 0 {
+		netStr += fmt.Sprintf(", (%d more)", moreCount)
+	}
+	ce.CachedNetworksStr = netStr
+
+	// Locations line
 	locs := strings.Split(ce.Locations, " | ")
 	if len(locs) <= 2 {
 		ce.CachedLocationStr = "  Location: " + ce.Locations
-		return
+	} else {
+		displayLocs := locs[:2]
+		ce.CachedLocationStr = fmt.Sprintf("  Location: %s | %s (%d more)", displayLocs[0], displayLocs[1], len(locs)-2)
 	}
-
-	displayLocs := locs[:2]
-	ce.CachedLocationStr = fmt.Sprintf("  Location: %s | %s (%d more)", displayLocs[0], displayLocs[1], len(locs)-2)
 }
 
 func (e *Engine) cacheImpactStrings(ce *CriticalEvent) {
@@ -1688,6 +1856,8 @@ func (e *Engine) getClassificationVisuals(classificationType ClassificationType)
 		return ColorOutage, nameHardOutage
 	case ClassificationRouteLeak:
 		return ColorCritical, nameRouteLeak
+	case ClassificationDDoSMitigation:
+		return ColorDDoSMitigation, nameDDoSMitigation
 	default:
 		return color.RGBA{}, ""
 	}
@@ -1699,7 +1869,7 @@ func (e *Engine) GetPriority(name string) int {
 		return 3 // Critical (Red)
 	case nameLinkFlap, nameNextHopFlap, nameAggFlap:
 		return 2 // Bad (Orange)
-	case namePolicyChurn, namePathOscillation, namePathHunting:
+	case namePolicyChurn, namePathOscillation, namePathHunting, nameDDoSMitigation:
 		return 1 // Normalish (Purple)
 	default:
 		return 0 // Discovery (Blue)
@@ -1710,6 +1880,8 @@ func (e *Engine) getClassificationUIColor(name string) color.RGBA {
 	switch name {
 	case nameRouteLeak, nameHardOutage:
 		return ColorWithUI
+	case nameDDoSMitigation:
+		return ColorDDoSMitigationUI
 	case nameLinkFlap, nameNextHopFlap, nameAggFlap:
 		return ColorBad // Already pretty bright
 	case namePolicyChurn, namePathOscillation, namePathHunting:
@@ -1763,6 +1935,8 @@ func (e *Engine) updateWindowedMetrics(eventType EventType, classificationType C
 		e.windowOutage++
 	case ClassificationRouteLeak:
 		e.windowLeak++
+	case ClassificationDDoSMitigation:
+		e.windowDDoS++
 	case ClassificationNone, ClassificationDiscovery:
 		e.windowGlobal++
 	}

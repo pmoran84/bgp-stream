@@ -63,6 +63,7 @@ const (
 	nameHardOutage      = "Outage"
 	nameRouteLeak       = "Route Leak"
 	nameDiscovery       = "Discovery"
+	nameDDoSMitigation  = "DDoS Mitigation"
 )
 
 const (
@@ -76,6 +77,7 @@ const (
 	ClassificationOutage
 	ClassificationRouteLeak
 	ClassificationDiscovery
+	ClassificationDDoSMitigation
 )
 
 func (t ClassificationType) String() string {
@@ -98,6 +100,8 @@ func (t ClassificationType) String() string {
 		return nameRouteLeak
 	case ClassificationDiscovery:
 		return nameDiscovery
+	case ClassificationDDoSMitigation:
+		return nameDDoSMitigation
 	default:
 		return "None"
 	}
@@ -206,6 +210,8 @@ func (c *Classifier) ClassifyEvent(prefix string, ctx *MessageContext) (PendingE
 	bucket := c.getOrCreateBucket(state, ctx.Now)
 	bucket.TotalMessages++
 
+	historicalOriginAsn := state.LastOriginAsn
+
 	if ctx.IsWithdrawal {
 		bucket.Withdrawals++
 	} else {
@@ -217,6 +223,9 @@ func (c *Classifier) ClassifyEvent(prefix string, ctx *MessageContext) (PendingE
 				state.LastRpkiStatus = int32(status)
 				state.LastOriginAsn = ctx.OriginASN
 			}
+		} else if ctx.LastRpkiStatus != 0 {
+			state.LastRpkiStatus = ctx.LastRpkiStatus
+			state.LastOriginAsn = ctx.OriginASN
 		}
 	}
 
@@ -246,6 +255,7 @@ func (c *Classifier) ClassifyEvent(prefix string, ctx *MessageContext) (PendingE
 				IP:                 c.prefixToIP(prefix),
 				Prefix:             prefix,
 				ASN:                ctx.OriginASN,
+				HistoricalASN:      state.LastOriginAsn,
 				EventType:          ctx.EventType(),
 				ClassificationType: ClassificationType(state.ClassifiedType),
 				LeakDetail:         ld,
@@ -253,7 +263,7 @@ func (c *Classifier) ClassifyEvent(prefix string, ctx *MessageContext) (PendingE
 		}
 	}
 
-	return c.evaluatePrefixState(prefix, state, ctx)
+	return c.evaluatePrefixState(prefix, state, historicalOriginAsn, ctx)
 }
 
 func (c *Classifier) getOrCreateBucket(state *bgpproto.PrefixState, now time.Time) *bgpproto.StatsBucket {
@@ -281,16 +291,16 @@ func (c *Classifier) getOrCreateBucket(state *bgpproto.PrefixState, now time.Tim
 func (c *Classifier) updateAnnouncementStats(state *bgpproto.PrefixState, bucket *bgpproto.StatsBucket, ctx *MessageContext) {
 	bucket.Announcements++
 
-	peer := ctx.Peer
+	sessionKey := ctx.Host + ":" + ctx.Peer
 	if state.PeerLastAttrs == nil {
 		state.PeerLastAttrs = make(map[string]*bgpproto.LastAttrs)
 	}
 
-	if last, ok := state.PeerLastAttrs[peer]; ok {
+	if last, ok := state.PeerLastAttrs[sessionKey]; ok {
 		c.compareAndUpdateBucketStats(bucket, last, ctx)
 	}
 
-	state.PeerLastAttrs[peer] = &bgpproto.LastAttrs{
+	state.PeerLastAttrs[sessionKey] = &bgpproto.LastAttrs{
 		Path:         ctx.PathStr,
 		Communities:  ctx.CommStr,
 		NextHop:      ctx.NextHop,
@@ -332,7 +342,7 @@ func (c *Classifier) compareAndUpdateBucketStats(bucket *bgpproto.StatsBucket, l
 	}
 }
 
-func (c *Classifier) evaluatePrefixState(prefix string, state *bgpproto.PrefixState, ctx *MessageContext) (PendingEvent, bool) {
+func (c *Classifier) evaluatePrefixState(prefix string, state *bgpproto.PrefixState, historicalOriginAsn uint32, ctx *MessageContext) (PendingEvent, bool) {
 	stats := c.aggregateRecentBuckets(state, ctx.Now, ctx.OriginASN)
 
 	elapsed := float64(ctx.Now.Unix() - stats.earliestTS)
@@ -344,7 +354,7 @@ func (c *Classifier) evaluatePrefixState(prefix string, state *bgpproto.PrefixSt
 	}
 
 	// Ensure we have seen enough messages over a small time window to classify
-	if elapsed < 120 && stats.totalMsgs < 5 {
+	if elapsed < 60 && stats.totalMsgs < 5 {
 		return PendingEvent{}, false
 	}
 
@@ -363,24 +373,31 @@ func (c *Classifier) evaluatePrefixState(prefix string, state *bgpproto.PrefixSt
 						VictimASN: state.VictimAsn,
 					}
 				}
+				if ClassificationType(state.ClassifiedType) == ClassificationDDoSMitigation && state.VictimAsn == 0 {
+					if ld == nil {
+						ld = &LeakDetail{}
+					}
+					ld.VictimASN = historicalOriginAsn
+				}
 				return PendingEvent{
 					IP:                 c.prefixToIP(prefix),
 					Prefix:             prefix,
 					ASN:                ctx.OriginASN,
+					HistoricalASN:      historicalOriginAsn,
 					EventType:          ctx.EventType(),
 					ClassificationType: ClassificationType(state.ClassifiedType),
 					LeakDetail:         ld,
 				}, true
 			}
 		}
-		return c.RecordClassification(prefix, state, anomType, ctx.Now.Unix(), ctx, leakDetail), true
+		return c.RecordClassification(prefix, state, anomType, ctx.Now.Unix(), ctx, historicalOriginAsn, leakDetail), true
 	}
 	return PendingEvent{}, false
 }
 
 func (c *Classifier) getPriority(t ClassificationType) int {
 	switch t {
-	case ClassificationRouteLeak, ClassificationOutage:
+	case ClassificationRouteLeak, ClassificationOutage, ClassificationDDoSMitigation:
 		return 3 // Critical
 	case ClassificationLinkFlap, ClassificationNextHopOscillation, ClassificationAggFlap:
 		return 2 // Bad
@@ -497,11 +514,7 @@ func (c *Classifier) findCriticalAnomaly(prefix string, s *prefixStats, elapsed 
 }
 
 func (c *Classifier) detectHijack(prefix string, peerCount, hostCount int, ctx *MessageContext) (ClassificationType, *LeakDetail, bool) {
-	if ctx.OriginASN == 0 || utils.RPKIStatus(ctx.LastRpkiStatus) != utils.RPKIInvalidASN {
-		return ClassificationNone, nil, false
-	}
-
-	if c.isDDoSProvider(ctx.OriginASN) {
+	if ctx.OriginASN == 0 || (utils.RPKIStatus(ctx.LastRpkiStatus) != utils.RPKIInvalidASN && utils.RPKIStatus(ctx.LastRpkiStatus) != utils.RPKIInvalidMaxLength) {
 		return ClassificationNone, nil, false
 	}
 
@@ -510,6 +523,16 @@ func (c *Classifier) detectHijack(prefix string, peerCount, hostCount int, ctx *
 	expectedASN := historicalASN
 	if expectedASN == 0 && c.rpki != nil {
 		expectedASN = c.rpki.GetExpectedASN(prefix)
+	}
+
+	if c.isDDoSProvider(ctx.OriginASN) {
+		if expectedASN == 0 || expectedASN == ctx.OriginASN || c.isSibling(ctx.OriginASN, expectedASN) {
+			return ClassificationNone, nil, false
+		}
+		return ClassificationDDoSMitigation, &LeakDetail{
+			LeakerASN: ctx.OriginASN,
+			VictimASN: expectedASN,
+		}, true
 	}
 
 	// Transition Hijack (Highest Signal)
@@ -840,7 +863,7 @@ func (c *Classifier) GetASNMapping() *utils.ASNMapping {
 	return c.asnMapping
 }
 
-func (c *Classifier) RecordClassification(prefix string, state *bgpproto.PrefixState, anomType ClassificationType, now int64, ctx *MessageContext, leakDetail ...*LeakDetail) PendingEvent {
+func (c *Classifier) RecordClassification(prefix string, state *bgpproto.PrefixState, anomType ClassificationType, now int64, ctx *MessageContext, historicalOriginAsn uint32, leakDetail ...*LeakDetail) PendingEvent {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.classificationStats[anomType]++
@@ -877,6 +900,16 @@ func (c *Classifier) RecordClassification(prefix string, state *bgpproto.PrefixS
 		state.VictimAsn = ld.VictimASN
 	}
 
+	if anomType == ClassificationDDoSMitigation && state.VictimAsn == 0 {
+		state.VictimAsn = historicalOriginAsn
+		if ld == nil {
+			ld = &LeakDetail{
+				LeakerASN: ctx.OriginASN,
+				VictimASN: historicalOriginAsn,
+			}
+		}
+	}
+
 	// Persist state if we have a stateDB
 	if c.stateDB != nil {
 		if data, err := proto.Marshal(state); err == nil {
@@ -888,6 +921,7 @@ func (c *Classifier) RecordClassification(prefix string, state *bgpproto.PrefixS
 		IP:                 c.prefixToIP(prefix),
 		Prefix:             prefix,
 		ASN:                originASN,
+		HistoricalASN:      historicalOriginAsn,
 		EventType:          ctx.EventType(),
 		ClassificationType: anomType,
 		LeakDetail:         ld,

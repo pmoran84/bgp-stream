@@ -84,6 +84,23 @@ func HashUint32(x uint32) uint32 {
 	return x
 }
 
+// FormatNumber formats a large number with commas (e.g. 1,234,567).
+func FormatNumber(n uint64) string {
+	s := fmt.Sprintf("%d", n)
+	if len(s) <= 3 {
+		return s
+	}
+	var res []string
+	for len(s) > 3 {
+		res = append([]string{s[len(s)-3:]}, res...)
+		s = s[:len(s)-3]
+	}
+	if len(s) > 0 {
+		res = append([]string{s}, res...)
+	}
+	return strings.Join(res, ",")
+}
+
 var ErrNotFound = errors.New("file not found on server")
 
 type progressWriter struct {

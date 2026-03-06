@@ -1,7 +1,10 @@
 package bgpengine
 
 import (
+	"encoding/binary"
 	"fmt"
+	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,7 +15,7 @@ import (
 func runClassificationTest(t *testing.T, name string, expect ClassificationType, steps func(p *BGPProcessor, now time.Time, classify func(prefix string, ctx *MessageContext))) {
 	t.Run(name, func(t *testing.T) {
 		var lastClassification ClassificationType
-		onEvent := func(lat, lng float64, cc, city string, eventType EventType, classificationType ClassificationType, prefix string, asn uint32, leakDetail ...*LeakDetail) {
+		onEvent := func(lat, lng float64, cc, city string, eventType EventType, classificationType ClassificationType, prefix string, asn, historicalASN uint32, leakDetail ...*LeakDetail) {
 			if classificationType != ClassificationNone {
 				lastClassification = classificationType
 			}
@@ -26,7 +29,11 @@ func runClassificationTest(t *testing.T, name string, expect ClassificationType,
 			wIdx := int(utils.HashUint32(p.prefixToIP(prefix)) % uint32(len(p.workers)))
 			if e, ok := p.workers[wIdx].classifier.ClassifyEvent(prefix, ctx); ok {
 				if lat, lng, cc, city, _ := p.geo(e.IP); cc != "" {
-					p.onEvent(lat, lng, cc, city, e.EventType, e.ClassificationType, e.Prefix, e.ASN, e.LeakDetail)
+					if e.LeakDetail != nil {
+						p.onEvent(lat, lng, cc, city, e.EventType, e.ClassificationType, e.Prefix, e.ASN, e.HistoricalASN, e.LeakDetail)
+					} else {
+						p.onEvent(lat, lng, cc, city, e.EventType, e.ClassificationType, e.Prefix, e.ASN, e.HistoricalASN)
+					}
 				}
 			}
 		}
@@ -48,7 +55,7 @@ func TestClassification(t *testing.T) {
 	})
 
 	runClassificationTest(t, "Discovery (Catch-all)", ClassificationDiscovery, func(p *BGPProcessor, now time.Time, classify func(string, *MessageContext)) {
-		for i := 0; i < 101; i++ {
+		for i := 0; i < 150; i++ {
 			classify("11.11.11.0/24", &MessageContext{
 				Peer: fmt.Sprintf("peer%d", i), PathStr: "[100 200]", Now: now.Add(time.Duration(i*5) * time.Second),
 			})
@@ -95,5 +102,53 @@ func TestClassification(t *testing.T) {
 		classify("6.6.6.0/24", &MessageContext{Peer: "p1", PathStr: "[100 200 300 400 500]", PathLen: 5, Now: now.Add(120 * time.Second)})
 		classify("6.6.6.0/24", &MessageContext{Peer: "p1", PathStr: "[100 200 300 400 500 600]", PathLen: 6, Now: now.Add(150 * time.Second)})
 		classify("6.6.6.0/24", &MessageContext{Peer: "p1", PathStr: "[100 200 300 400 500 600 700]", PathLen: 7, Now: now.Add(180 * time.Second)})
+	})
+
+	runClassificationTest(t, "DDoS Mitigation", ClassificationDDoSMitigation, func(p *BGPProcessor, now time.Time, classify func(string, *MessageContext)) {
+		prefix := "7.7.7.0/24"
+
+		// Mock historical origin in seenDB
+		seenDBPath := filepath.Join(t.TempDir(), "test-seen-ddos-main.db")
+		seenDB, _ := utils.OpenDiskTrie(seenDBPath)
+		defer func() { _ = seenDB.Close() }()
+		oldASN := uint32(1234)
+		asnData := make([]byte, 4)
+		binary.BigEndian.PutUint32(asnData, oldASN)
+		_, ipNet, _ := net.ParseCIDR(prefix)
+		_ = seenDB.Insert(ipNet, asnData)
+
+		for i := range p.workers {
+			p.workers[i].classifier.seenDB = seenDB
+		}
+
+		// Mock a historical origin by sending a valid announcement first
+		for i := 0; i < 10; i++ {
+			classify(prefix, &MessageContext{
+				Peer: fmt.Sprintf("peer%d", i), Host: fmt.Sprintf("rrc%d", i%3),
+				OriginASN: 1234,
+				LastRpkiStatus: int32(utils.RPKIValid),
+				Now: now.Add(time.Duration(i*30) * time.Second),
+			})
+		}
+
+		// Now send the DDoS mitigation announcements
+		for i := 0; i < 10; i++ {
+			host := fmt.Sprintf("rrc%d", i%3)
+			classify(prefix, &MessageContext{
+				Peer: fmt.Sprintf("peer%d", i+10), Host: host,
+				OriginASN: 13335, // Cloudflare (DDoS Provider)
+				LastRpkiStatus: int32(utils.RPKIInvalidASN),
+				Now: now.Add(10*time.Minute + time.Duration(i*30)*time.Second),
+			})
+		}
+
+		// Verify leak details (Provider/Impacted)
+		finalState, _ := p.workers[int(utils.HashUint32(p.prefixToIP(prefix))%uint32(len(p.workers)))].classifier.GetPrefixState(prefix)
+		if finalState.LeakerAsn != 13335 {
+			t.Errorf("expected Provider AS13335, got AS%d", finalState.LeakerAsn)
+		}
+		if finalState.VictimAsn != 1234 {
+			t.Errorf("expected Impacted AS1234, got AS%d", finalState.VictimAsn)
+		}
 	})
 }

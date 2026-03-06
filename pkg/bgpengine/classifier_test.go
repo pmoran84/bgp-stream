@@ -143,4 +143,103 @@ func TestClassifier_FindCriticalAnomaly(t *testing.T) {
 			t.Errorf("findCriticalAnomaly() expected RouteLeak, got %v, %v", et, ok)
 		}
 	})
+
+	t.Run("DDoS Mitigation Detection", func(t *testing.T) {
+		// Mock seen DB for historical origin
+		seenDBPath := filepath.Join(t.TempDir(), "test-seen-ddos.db")
+		seenDB, _ := utils.OpenDiskTrie(seenDBPath)
+		defer func() { _ = seenDB.Close() }()
+
+		oldASN := uint32(1234)
+		asnData := make([]byte, 4)
+		binary.BigEndian.PutUint32(asnData, oldASN)
+		_, ipNet, _ := net.ParseCIDR("1.1.1.0/24")
+		_ = seenDB.Insert(ipNet, asnData)
+
+		c.seenDB = seenDB
+
+		s := &prefixStats{
+			uniquePeers: map[string]bool{"p1": true},
+			uniqueHosts: map[string]bool{"h1": true},
+		}
+
+		ctx := &MessageContext{
+			OriginASN:      13335, // Cloudflare
+			LastRpkiStatus: int32(utils.RPKIInvalidASN),
+			Now:            now,
+		}
+
+		et, _, ok := c.findCriticalAnomaly("1.1.1.0/24", s, 65.0, ctx)
+		if !ok || et != ClassificationDDoSMitigation {
+			t.Errorf("findCriticalAnomaly() expected DDoSMitigation, got %v, %v", et, ok)
+		}
+	})
+
+	t.Run("DDoS Mitigation Self-Filter", func(t *testing.T) {
+		// Mock seen DB where historical origin is SAME as provider
+		seenDBPath := filepath.Join(t.TempDir(), "test-seen-ddos-self.db")
+		seenDB, _ := utils.OpenDiskTrie(seenDBPath)
+		defer func() { _ = seenDB.Close() }()
+
+		providerASN := uint32(13335)
+		asnData := make([]byte, 4)
+		binary.BigEndian.PutUint32(asnData, providerASN)
+		_, ipNet, _ := net.ParseCIDR("1.1.1.0/24")
+		_ = seenDB.Insert(ipNet, asnData)
+
+		c.seenDB = seenDB
+
+		s := &prefixStats{
+			uniquePeers: map[string]bool{"p1": true},
+			uniqueHosts: map[string]bool{"h1": true},
+		}
+
+		ctx := &MessageContext{
+			OriginASN:      providerASN, // Same as historical
+			LastRpkiStatus: int32(utils.RPKIInvalidASN),
+			Now:            now,
+		}
+
+		et, _, ok := c.findCriticalAnomaly("1.1.1.0/24", s, 65.0, ctx)
+		if ok || et == ClassificationDDoSMitigation {
+			t.Errorf("findCriticalAnomaly() expected None for self-mitigation, got %v", et)
+		}
+	})
+
+	t.Run("DDoS Mitigation Sibling Filter", func(t *testing.T) {
+		// Mock ASN mapping with siblings
+		asnMapping := utils.NewASNMapping()
+		utils.SetASNOrgID(asnMapping, 13335, "CLOUDFLARE")
+		utils.SetASNOrgID(asnMapping, 13336, "CLOUDFLARE")
+		c.asnMapping = asnMapping
+
+		// Mock seen DB where historical origin is SIBLING of provider
+		seenDBPath := filepath.Join(t.TempDir(), "test-seen-ddos-sibling.db")
+		seenDB, _ := utils.OpenDiskTrie(seenDBPath)
+		defer func() { _ = seenDB.Close() }()
+
+		oldASN := uint32(13336)
+		asnData := make([]byte, 4)
+		binary.BigEndian.PutUint32(asnData, oldASN)
+		_, ipNet, _ := net.ParseCIDR("1.1.1.0/24")
+		_ = seenDB.Insert(ipNet, asnData)
+
+		c.seenDB = seenDB
+
+		s := &prefixStats{
+			uniquePeers: map[string]bool{"p1": true},
+			uniqueHosts: map[string]bool{"h1": true},
+		}
+
+		ctx := &MessageContext{
+			OriginASN:      13335, // Cloudflare
+			LastRpkiStatus: int32(utils.RPKIInvalidASN),
+			Now:            now,
+		}
+
+		et, _, ok := c.findCriticalAnomaly("1.1.1.0/24", s, 65.0, ctx)
+		if ok || et == ClassificationDDoSMitigation {
+			t.Errorf("findCriticalAnomaly() expected None for sibling mitigation, got %v", et)
+		}
+	})
 }

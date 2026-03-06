@@ -86,7 +86,7 @@ func TestEngineOutageClearing(t *testing.T) {
 	prefix := "1.2.3.0/24"
 
 	// 1. Manually record an outage event
-	e.recordEvent(0, 0, "US", "New York", EventUnknown, ClassificationOutage, prefix, 0)
+	e.recordEvent(0, 0, "US", "New York", EventUnknown, ClassificationOutage, prefix, 0, 0)
 
 	// Wait for event to process (since it's async now)
 	time.Sleep(100 * time.Millisecond)
@@ -100,7 +100,7 @@ func TestEngineOutageClearing(t *testing.T) {
 
 	// 2. Record an announcement event (EventUpdate) for the same prefix
 	// This should clear the ClassificationOutage from currentAnomalies
-	e.recordEvent(0, 0, "US", "New York", EventUpdate, ClassificationNone, prefix, 0)
+	e.recordEvent(0, 0, "US", "New York", EventUpdate, ClassificationNone, prefix, 0, 0)
 
 	// Wait for event to process
 	time.Sleep(100 * time.Millisecond)
