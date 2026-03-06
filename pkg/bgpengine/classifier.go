@@ -967,9 +967,11 @@ func (c *Classifier) RecordClassification(prefix string, state *bgpproto.PrefixS
 		state.VictimAsn = historicalOriginAsn
 		if ld == nil {
 			ld = &LeakDetail{
-				LeakerASN: ctx.OriginASN,
+				LeakerASN: originASN,
 				VictimASN: historicalOriginAsn,
 			}
+		} else if ld.LeakerASN == 0 {
+			ld.LeakerASN = originASN
 		}
 	}
 
