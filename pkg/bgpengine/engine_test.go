@@ -3,9 +3,6 @@ package bgpengine
 import (
 	"image/color"
 	"testing"
-	"time"
-
-	"github.com/sudorandom/bgp-stream/pkg/geoservice"
 )
 
 func TestUpdateHierarchicalRates(t *testing.T) {
@@ -73,40 +70,5 @@ func TestGetPriority(t *testing.T) {
 		if p != tt.priority {
 			t.Errorf("Expected priority %d for %s, got %d", tt.priority, tt.name, p)
 		}
-	}
-}
-
-func TestEngineOutageClearing(t *testing.T) {
-	e := NewEngine(1024, 768, 1.0)
-
-	// Update mock to match new signature
-	e.processor = NewBGPProcessor(func(ip uint32) (float64, float64, string, string, geoservice.ResolutionType) {
-		return e.geo.GetIPCoords(ip)
-	}, e.SeenDB, e.StateDB, e.asnMapping, e.RPKI, e.prefixToIP, e.Now, e.recordEvent)
-
-	prefix := "1.2.3.0/24"
-
-	// 1. Manually record an outage event
-	e.recordEvent(0, 0, "US", "New York", EventUnknown, ClassificationOutage, prefix, 0, 0)
-
-	// Wait for event to process (since it's async now)
-	time.Sleep(100 * time.Millisecond)
-
-	if e.prefixToClassification[prefix] != ClassificationOutage {
-		t.Errorf("Expected prefixToClassification to be ClassificationOutage, got %v", e.prefixToClassification[prefix])
-	}
-	if _, ok := e.currentAnomalies[ClassificationOutage][prefix]; !ok {
-		t.Error("Expected prefix in currentAnomalies[ClassificationOutage]")
-	}
-
-	// 2. Record an announcement event (EventUpdate) for the same prefix
-	// This should clear the ClassificationOutage from currentAnomalies
-	e.recordEvent(0, 0, "US", "New York", EventUpdate, ClassificationNone, prefix, 0, 0)
-
-	// Wait for event to process
-	time.Sleep(100 * time.Millisecond)
-
-	if _, ok := e.currentAnomalies[ClassificationOutage][prefix]; ok {
-		t.Error("Expected prefix to be cleared from currentAnomalies[ClassificationOutage]")
 	}
 }

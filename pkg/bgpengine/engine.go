@@ -252,15 +252,6 @@ type Engine struct {
 	StateDB *utils.DiskTrie
 	RPKI    *utils.RPKIManager
 
-	// Reusable structures for updates (to reduce allocations)
-	impactMap       map[string]*VisualImpact
-	allImpact       []*VisualImpact
-	countMap        map[string]*PrefixCount
-	asnsPerClass    map[string]map[uint32]struct{}
-	asnGroups       map[asnGroupKey]*asnGroup
-	asnSortedGroups []*asnGroup
-	hubCurrent      []hub
-
 	audioPlayer *AudioPlayer
 	processor   *BGPProcessor
 	asnMapping  *utils.ASNMapping
@@ -315,6 +306,7 @@ type Engine struct {
 	droppedStale  atomic.Uint64
 
 	eventCh chan *bgpEvent
+	statsCh chan *statsEvent
 }
 
 type bgpEvent struct {
@@ -471,10 +463,6 @@ func NewEngine(width, height int, scale float64) *Engine {
 		prefixToClassification: make(map[string]ClassificationType),
 		currentAnomalies:       make(map[ClassificationType]map[string]int),
 		VisualImpact:           make(map[string]*VisualImpact),
-		impactMap:              make(map[string]*VisualImpact),
-		countMap:               make(map[string]*PrefixCount),
-		asnsPerClass:           make(map[string]map[uint32]struct{}),
-		asnGroups:              make(map[asnGroupKey]*asnGroup),
 		lastFrameCapturedAt:    time.Now(),
 		drawOp:                 &ebiten.DrawImageOptions{},
 		currentZoom:            1.0,
@@ -486,11 +474,13 @@ func NewEngine(width, height int, scale float64) *Engine {
 		tourRegionIndex:        -1, // Start with full map
 		tourRegionStayDuration: 10 * time.Second,
 		eventCh:                make(chan *bgpEvent, 250000),
+		statsCh:                make(chan *statsEvent, 250000),
 		criticalCooldown:       make(map[string]time.Time),
 		streamDirty:            true,
 	}
 	e.dataMgr = geoservice.NewDataManager(e.geo)
 	go e.runEventWorker()
+	go e.runStatsWorker()
 
 	e.whitePixel = ebiten.NewImage(1, 1)
 	e.whitePixel.Fill(color.White)
@@ -519,8 +509,6 @@ func NewEngine(width, height int, scale float64) *Engine {
 	e.artistFace = &text.GoTextFace{Source: s, Size: fontSize * 0.7}
 	e.titleFace09 = &text.GoTextFace{Source: s, Size: fontSize * 0.9}
 	e.titleFace05 = &text.GoTextFace{Source: s, Size: fontSize * 0.5}
-
-	e.updatePrefixCounts(nil)
 
 	e.legendRows = []legendRow{
 		// Column 1: Normal (Blue/Purple)
@@ -1386,68 +1374,35 @@ func (e *Engine) recordEvent(lat, lng float64, cc, city string, eventType EventT
 func (e *Engine) processEventLocked(ev *bgpEvent) {
 	// 1. Track prefix impact (latest bucket)
 	if ev.prefix != "" {
-		e.updatePrefixImpact(ev)
+		if utils.IsBeaconPrefix(ev.prefix) {
+			e.windowBeacon++
+		}
 	}
 
-	// 2. Track country activity
-	if ev.cc != "" {
-		e.countryActivity[ev.cc]++
-	}
-
-	// 3. Determine color and name based on Level 2 type
+	// 2. Determine color and name based on Level 2 type
 	c, name := e.getClassificationVisuals(ev.classificationType)
 
-	// 4. Buffer city activity
+	// 3. Buffer city activity
 	e.incrementCityBuffer(ev.lat, ev.lng, c)
 
-	// 5. Update Visual Impact metadata
-	if ev.prefix != "" {
-		e.updateHierarchicalRates(ev.prefix, name, ev.cc, c, ev.leakDetail)
-	}
-
-	// Record to CriticalStream if it's a critical anomaly
+	// 4. Record to CriticalStream if it's a critical anomaly
 	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation {
 		e.recordToCriticalStream(ev, c, name)
 	}
 
-	// 6. Update windowed metrics (this drives the dashboard numbers)
+	// 5. Update windowed metrics (this drives the dashboard numbers)
 	e.updateWindowedMetrics(ev.eventType, ev.classificationType, ev.prefix, ev.asn)
-}
 
-func (e *Engine) updatePrefixImpact(ev *bgpEvent) {
-	if len(e.prefixImpactHistory) > 0 {
-		bucket := e.prefixImpactHistory[len(e.prefixImpactHistory)-1]
-		if bucket == nil {
-			bucket = make(map[string]int)
-			e.prefixImpactHistory[len(e.prefixImpactHistory)-1] = bucket
-		}
-		bucket[ev.prefix]++
-	}
-	if e.prefixToASN == nil {
-		e.prefixToASN = make(map[string]uint32)
-	}
-	if ev.asn != 0 {
-		e.prefixToASN[ev.prefix] = ev.asn
-	}
-	if utils.IsBeaconPrefix(ev.prefix) {
-		e.windowBeacon++
+	// Filter out invalid DDoS Mitigation events from stats so they don't appear in summaries
+	if ev.classificationType == ClassificationDDoSMitigation && (ev.leakDetail == nil || ev.leakDetail.LeakerASN == 0 || ev.leakDetail.VictimASN == 0) {
+		return
 	}
 
-	// Track all anomalies and patterns
-	e.prefixToClassification[ev.prefix] = ev.classificationType
-
-	// If this is an announcement, clear any existing Outage classification for this prefix
-	if ev.eventType == EventNew || ev.eventType == EventUpdate || ev.eventType == EventGossip {
-		if prefixes, ok := e.currentAnomalies[ClassificationOutage]; ok {
-			delete(prefixes, ev.prefix)
-		}
-	}
-
-	if actualType, ok := e.prefixToClassification[ev.prefix]; ok {
-		if e.currentAnomalies[actualType] == nil {
-			e.currentAnomalies[actualType] = make(map[string]int)
-		}
-		e.currentAnomalies[actualType][ev.prefix]++
+	// 6. Offload remaining heavy stat accumulation to stats worker
+	select {
+	case e.statsCh <- &statsEvent{ev: ev, name: name, c: c}:
+	default:
+		// Drop stat tracking if channel full to preserve main UI thread
 	}
 }
 
@@ -1479,7 +1434,12 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 
 	// Filter out DDoS Mitigation if we don't know the provider ASN or impacted ASN
 	if ev.classificationType == ClassificationDDoSMitigation {
-		if ev.asn == 0 {
+		providerASN := ev.asn
+		if providerASN == 0 && ev.leakDetail != nil {
+			providerASN = ev.leakDetail.LeakerASN
+		}
+
+		if providerASN == 0 {
 			return
 		}
 
@@ -1490,11 +1450,11 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 		if victimASN == 0 {
 			victimASN = ev.historicalASN
 		}
-		if victimASN == 0 || victimASN == ev.asn {
+		if victimASN == 0 || victimASN == providerASN {
 			return
 		}
 		// Also check sibling relationship
-		if e.processor != nil && e.processor.workers[0].classifier.isSibling(ev.asn, victimASN) {
+		if e.processor != nil && e.processor.workers[0].classifier.isSibling(providerASN, victimASN) {
 			return
 		}
 	}
