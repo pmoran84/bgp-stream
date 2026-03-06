@@ -323,8 +323,8 @@ func (e *Engine) drawCriticalEvent(ce *CriticalEvent, x, y, boxW, boxH, fontSize
 	textOp.GeoM.Reset()
 	textOp.GeoM.Translate(x+ce.CachedTypeWidth+10, y)
 
-	// Use a distinct color for sub-classifications (Route Leak types) or Impact
-	if ce.Anom == nameRouteLeak || ce.Anom == nameHardOutage {
+	// Use a distinct color for sub-classifications (Route Leak types, DDoS) or Impact
+	if ce.Anom == nameRouteLeak || ce.Anom == nameHardOutage || ce.Anom == nameDDoSMitigation {
 		textOp.ColorScale.Reset()
 		textOp.ColorScale.Scale(0, 1, 1, 0.9) // Cyan for sub-type or impact
 	} else {
@@ -601,11 +601,11 @@ func (e *Engine) aggregateMetrics(s *MetricSnapshot) (good, poly, bad, crit int)
 	// Normal (Blue)
 	good = s.Global
 	// Policy (Purple)
-	poly = s.Hunting + s.TE + s.Oscill + s.DDoS
+	poly = s.Hunting + s.TE + s.Oscill
 	// Bad (Orange)
 	bad = s.LinkFlap + s.AggFlap + s.NextHop
 	// Critical (Red)
-	crit = s.Outage + s.Leak
+	crit = s.Outage + s.Leak + s.DDoS
 	return
 }
 

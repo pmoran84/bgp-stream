@@ -526,7 +526,6 @@ func NewEngine(width, height int, scale float64) *Engine {
 		// Column 1: Normal (Blue/Purple)
 		{"DISCOVERY", 0, ColorDiscovery, ColorGossipUI, func(s MetricSnapshot) int { return s.Global }},
 		{"POLICY CHURN", 0, ColorPolicy, ColorUpdUI, func(s MetricSnapshot) int { return s.TE }},
-		{"DDOS MITIGATION", 0, ColorDDoSMitigation, ColorDDoSMitigationUI, func(s MetricSnapshot) int { return s.DDoS }},
 		{"PATH HUNTING", 0, ColorPolicy, ColorUpdUI, func(s MetricSnapshot) int { return s.Hunting }},
 		{"PATH OSCILLATION", 0, ColorPolicy, ColorUpdUI, func(s MetricSnapshot) int { return s.Oscill }},
 
@@ -536,6 +535,7 @@ func NewEngine(width, height int, scale float64) *Engine {
 		{"LINK FLAP", 0, ColorBad, ColorBad, func(s MetricSnapshot) int { return s.LinkFlap }},
 
 		// Column 3: Critical (Red)
+		{"DDOS MITIGATION", 0, ColorOutage, ColorWithUI, func(s MetricSnapshot) int { return s.DDoS }},
 		{"ROUTE LEAK", 0, ColorLeak, ColorWithUI, func(s MetricSnapshot) int { return s.Leak }},
 		{"OUTAGE", 0, ColorOutage, ColorWithUI, func(s MetricSnapshot) int { return s.Outage }},
 	}
@@ -1477,8 +1477,12 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 		return
 	}
 
-	// Filter out DDoS Mitigation if we don't know the impacted ASN
+	// Filter out DDoS Mitigation if we don't know the provider ASN or impacted ASN
 	if ev.classificationType == ClassificationDDoSMitigation {
+		if ev.asn == 0 {
+			return
+		}
+
 		victimASN := uint32(0)
 		if ev.leakDetail != nil {
 			victimASN = ev.leakDetail.VictimASN
@@ -1629,17 +1633,21 @@ func (e *Engine) updateCriticalEventCacheStrs(ce *CriticalEvent) {
 	ce.CachedTypeLabel = "[" + strings.ToUpper(ce.Anom) + "]"
 	ce.CachedTypeWidth, _ = text.Measure(ce.CachedTypeLabel, e.subMonoFace, 0)
 
-	if ce.Anom == nameHardOutage {
+	if ce.Anom == nameHardOutage || ce.Anom == nameDDoSMitigation {
 		ce.CachedFirstLine = fmt.Sprintf(" %s IPs Impacted", utils.FormatNumber(ce.ImpactedIPs))
-		e.cacheOutageStrings(ce)
+		if ce.Anom == nameHardOutage {
+			e.cacheOutageStrings(ce)
+		} else if ce.LeakerASN != 0 {
+			e.cacheLeakStrings(ce)
+		}
 	} else {
 		ce.CachedFirstLine = ce.ASNStr
-		if (ce.Anom == nameRouteLeak || ce.Anom == nameDDoSMitigation) && ce.LeakerASN != 0 {
+		if ce.Anom == nameRouteLeak && ce.LeakerASN != 0 {
 			e.cacheLeakStrings(ce)
 		}
 	}
 
-	if ce.ImpactedIPs > 0 && ce.Anom != nameHardOutage {
+	if ce.ImpactedIPs > 0 && ce.Anom != nameHardOutage && ce.Anom != nameDDoSMitigation {
 		e.cacheImpactStrings(ce)
 	}
 }
@@ -1845,7 +1853,7 @@ func (e *Engine) getClassificationVisuals(classificationType ClassificationType)
 	case ClassificationRouteLeak:
 		return ColorCritical, nameRouteLeak
 	case ClassificationDDoSMitigation:
-		return ColorDDoSMitigation, nameDDoSMitigation
+		return ColorOutage, nameDDoSMitigation
 	default:
 		return color.RGBA{}, ""
 	}
@@ -1853,11 +1861,11 @@ func (e *Engine) getClassificationVisuals(classificationType ClassificationType)
 
 func (e *Engine) GetPriority(name string) int {
 	switch name {
-	case nameRouteLeak, nameHardOutage:
+	case nameRouteLeak, nameHardOutage, nameDDoSMitigation:
 		return 3 // Critical (Red)
 	case nameLinkFlap, nameNextHopFlap, nameAggFlap:
 		return 2 // Bad (Orange)
-	case namePolicyChurn, namePathOscillation, namePathHunting, nameDDoSMitigation:
+	case namePolicyChurn, namePathOscillation, namePathHunting:
 		return 1 // Normalish (Purple)
 	default:
 		return 0 // Discovery (Blue)
@@ -1866,10 +1874,8 @@ func (e *Engine) GetPriority(name string) int {
 
 func (e *Engine) getClassificationUIColor(name string) color.RGBA {
 	switch name {
-	case nameRouteLeak, nameHardOutage:
+	case nameRouteLeak, nameHardOutage, nameDDoSMitigation:
 		return ColorWithUI
-	case nameDDoSMitigation:
-		return ColorDDoSMitigationUI
 	case nameLinkFlap, nameNextHopFlap, nameAggFlap:
 		return ColorBad // Already pretty bright
 	case namePolicyChurn, namePathOscillation, namePathHunting:

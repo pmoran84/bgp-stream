@@ -60,6 +60,7 @@ func TestGetPriority(t *testing.T) {
 	}{
 		{nameRouteLeak, 3},
 		{nameHardOutage, 3},
+		{nameDDoSMitigation, 3},
 		{nameLinkFlap, 2},
 		{namePolicyChurn, 1},
 		{nameDiscovery, 0},
