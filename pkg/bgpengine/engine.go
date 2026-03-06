@@ -1177,12 +1177,12 @@ func (e *Engine) updateMetrics() {
 
 	e.updateBeaconPercent()
 
-	// Cleanup Critical Event Stream (remove entries older than 60s)
+	// Cleanup Critical Event Stream (remove entries older than 10 mins)
 	now := e.Now()
 	activeStream := e.CriticalStream[:0]
 	removedAny := false
 	for _, ce := range e.CriticalStream {
-		if now.Sub(ce.Timestamp) < 60*time.Second {
+		if now.Sub(ce.Timestamp) < 10*time.Minute {
 			activeStream = append(activeStream, ce)
 		} else {
 			removedAny = true
@@ -1425,45 +1425,59 @@ func (e *Engine) getBestLocation(prefix, cc, city string) string {
 	return cc
 }
 
+func (e *Engine) isIgnoredDDoS(ev *bgpEvent) bool {
+	if ev.classificationType != ClassificationDDoSMitigation {
+		return false
+	}
+
+	providerASN := ev.asn
+	if providerASN == 0 && ev.leakDetail != nil {
+		providerASN = ev.leakDetail.LeakerASN
+	}
+
+	if providerASN == 0 {
+		return true
+	}
+
+	victimASN := uint32(0)
+	if ev.leakDetail != nil {
+		victimASN = ev.leakDetail.VictimASN
+	}
+	if victimASN == 0 {
+		victimASN = ev.historicalASN
+	}
+	if victimASN == 0 || victimASN == providerASN {
+		return true
+	}
+	// Also check sibling relationship
+	if e.processor != nil && e.processor.workers[0].classifier.isSibling(providerASN, victimASN) {
+		return true
+	}
+	return false
+}
+
 func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string) {
-	// Filter out ASN 0 for outages as requested
-	if ev.classificationType == ClassificationOutage && ev.asn == 0 {
+	// Filter out ASN 0 for outages only if we ALSO don't have a historical ASN
+	if ev.classificationType == ClassificationOutage && ev.asn == 0 && ev.historicalASN == 0 {
 		return
 	}
 
-	// Filter out DDoS Mitigation if we don't know the provider ASN or impacted ASN
-	if ev.classificationType == ClassificationDDoSMitigation {
-		providerASN := ev.asn
-		if providerASN == 0 && ev.leakDetail != nil {
-			providerASN = ev.leakDetail.LeakerASN
-		}
-
-		if providerASN == 0 {
-			return
-		}
-
-		victimASN := uint32(0)
-		if ev.leakDetail != nil {
-			victimASN = ev.leakDetail.VictimASN
-		}
-		if victimASN == 0 {
-			victimASN = ev.historicalASN
-		}
-		if victimASN == 0 || victimASN == providerASN {
-			return
-		}
-		// Also check sibling relationship
-		if e.processor != nil && e.processor.workers[0].classifier.isSibling(providerASN, victimASN) {
-			return
-		}
+	// Filter out invalid DDoS Mitigation events
+	if e.isIgnoredDDoS(ev) {
+		return
 	}
 
 	now := time.Now()
-	asnStr := fmt.Sprintf("AS%d", ev.asn)
+	asnToUse := ev.asn
+	if asnToUse == 0 {
+		asnToUse = ev.historicalASN
+	}
+
+	asnStr := fmt.Sprintf("AS%d", asnToUse)
 	orgID := ""
 	if e.asnMapping != nil {
-		orgID = e.asnMapping.GetOrgID(ev.asn)
-		if n := e.asnMapping.GetName(ev.asn); n != "" {
+		orgID = e.asnMapping.GetOrgID(asnToUse)
+		if n := e.asnMapping.GetName(asnToUse); n != "" {
 			asnStr += " - " + n
 		}
 	}
@@ -1471,26 +1485,21 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 	newLoc := e.getBestLocation(ev.prefix, ev.cc, ev.city)
 
 	// Check for duplicates across the entire visible stream
-	var existing *CriticalEvent
 	for _, ce := range e.CriticalStream {
-		if e.isSameEvent(ce, name, ev.asn, orgID, ev.leakDetail) {
-			existing = ce
-			break
+		if e.isSameEvent(ce, ev, name, orgID) {
+			// If we found an existing event, update it in place
+			if e.updateExistingCriticalEvent(ce, ev) {
+				e.updateCriticalEventCacheStrs(ce)
+			}
+			ce.Timestamp = now // Update timestamp to show it's still active/relevant
+			e.streamDirty = true
+			return
 		}
-	}
-
-	if existing != nil {
-		// If we found an existing event, update it in place
-		if e.updateExistingCriticalEvent(existing, ev) {
-			e.updateCriticalEventCacheStrs(existing)
-		}
-		existing.Timestamp = now // Update timestamp to show it's still active/relevant
-		e.streamDirty = true
-		return
 	}
 
 	// Only add a new event if it's not on a per-prefix cooldown
-	if lastTime, ok := e.criticalCooldown[ev.prefix]; ok && now.Sub(lastTime) < 10*time.Second {
+	// Substantial cooldown: 10 minutes
+	if lastTime, ok := e.criticalCooldown[ev.prefix]; ok && now.Sub(lastTime) < 10*time.Minute {
 		return
 	}
 
@@ -1501,20 +1510,47 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 	e.addNewCriticalEvent(ev, c, name, asnStr, orgID, newLoc, now)
 }
 
-func (e *Engine) isSameEvent(ce *CriticalEvent, anomName string, asn uint32, orgID string, ld *LeakDetail) bool {
-	if ce.Anom != anomName {
+func (e *Engine) isSameEvent(ce *CriticalEvent, ev *bgpEvent, name, orgID string) bool {
+	if ce.Anom != name {
 		return false
 	}
 
-	// For Route Leaks, we match based on the leak details themselves
-	if anomName == nameRouteLeak && ld != nil {
-		return ce.LeakType == ld.Type && ce.LeakerASN == ld.LeakerASN && ce.VictimASN == ld.VictimASN
+	// For Route Leaks match based on leak details
+	if name == nameRouteLeak && ev.leakDetail != nil {
+		return ce.LeakType == ev.leakDetail.Type && ce.LeakerASN == ev.leakDetail.LeakerASN && ce.VictimASN == ev.leakDetail.VictimASN
 	}
 
-	// For other anomalies (like Outages), match by Origin ASN (if known)
+	// For DDoS Mitigation, always match by provider/victim pair
+	if name == nameDDoSMitigation {
+		leaker := ev.asn
+		victim := ev.historicalASN
+		if ev.leakDetail != nil {
+			leaker = ev.leakDetail.LeakerASN
+			victim = ev.leakDetail.VictimASN
+		}
+		// If both are unknown/0, we can't safely deduplicate across victims
+		if leaker == 0 && victim == 0 {
+			return false
+		}
+		return ce.LeakerASN == leaker && ce.VictimASN == victim
+	}
+
+	// For other anomalies (like Outages), match by Origin ASN
+	asn := ev.asn
+	if asn == 0 {
+		asn = ev.historicalASN
+	}
+
 	if asn != 0 && ce.ASN != 0 && asn == ce.ASN {
 		return true
 	}
+
+	// If the current event's ASN is 0, check if it matches the ce.LeakerASN or ce.VictimASN
+	// This helps with DDoS Mitigation and Route Leaks where ce.ASN might be different
+	if asn != 0 && (asn == ce.LeakerASN || asn == ce.VictimASN) {
+		return true
+	}
+
 	// Match by Organization (if known)
 	if orgID != "" && ce.OrgID != "" && orgID == ce.OrgID {
 		return true
@@ -1577,10 +1613,14 @@ func (e *Engine) updateExistingCriticalEvent(ce *CriticalEvent, ev *bgpEvent) bo
 }
 
 func (e *Engine) addNewCriticalEvent(ev *bgpEvent, c color.RGBA, name, asnStr, orgID, newLoc string, now time.Time) {
+	asnToUse := ev.asn
+	if asnToUse == 0 {
+		asnToUse = ev.historicalASN
+	}
 	ce := &CriticalEvent{
 		Timestamp:        now,
 		Anom:             name,
-		ASN:              ev.asn,
+		ASN:              asnToUse,
 		ASNStr:           asnStr,
 		OrgID:            orgID,
 		Color:            c,
@@ -1617,7 +1657,9 @@ func (e *Engine) addNewCriticalEvent(ev *bgpEvent, c color.RGBA, name, asnStr, o
 
 func (e *Engine) updateCriticalEventCacheStrs(ce *CriticalEvent) {
 	ce.CachedTypeLabel = "[" + strings.ToUpper(ce.Anom) + "]"
-	ce.CachedTypeWidth, _ = text.Measure(ce.CachedTypeLabel, e.subMonoFace, 0)
+	if e.subMonoFace != nil {
+		ce.CachedTypeWidth, _ = text.Measure(ce.CachedTypeLabel, e.subMonoFace, 0)
+	}
 
 	if ce.Anom == nameHardOutage || ce.Anom == nameDDoSMitigation {
 		ce.CachedFirstLine = fmt.Sprintf(" %s IPs Impacted", utils.FormatNumber(ce.ImpactedIPs))
