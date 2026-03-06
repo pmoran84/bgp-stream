@@ -1,53 +1,8 @@
 package bgpengine
 
 import (
-	"image/color"
 	"testing"
 )
-
-func TestUpdateHierarchicalRates(t *testing.T) {
-	e := &Engine{
-		VisualImpact: make(map[string]*VisualImpact),
-	}
-
-	prefix := "1.1.1.0/24"
-	name := nameRouteLeak
-	col := color.RGBA{255, 0, 0, 255}
-
-	// First update with high-priority classification
-	e.updateHierarchicalRates(prefix, name, "US", col, nil)
-
-	vi, ok := e.VisualImpact[prefix]
-	if !ok {
-		t.Fatal("Expected VisualImpact to be created")
-	}
-	if vi.ClassificationName != name {
-		t.Errorf("Expected ClassificationName %s, got %s", name, vi.ClassificationName)
-	}
-	if vi.ClassificationColor != col {
-		t.Errorf("Expected ClassificationColor %v, got %v", col, vi.ClassificationColor)
-	}
-
-	// Second update with lower-priority classification (should not overwrite)
-	e.updateHierarchicalRates(prefix, namePolicyChurn, "DE", color.RGBA{148, 0, 211, 255}, nil)
-	if vi.ClassificationName != name {
-		t.Errorf("Expected ClassificationName to remain %s, got %s", name, vi.ClassificationName)
-	}
-
-	// Third update with empty classification (should not overwrite)
-	e.updateHierarchicalRates(prefix, "", "", color.RGBA{}, nil)
-	if vi.ClassificationName != name {
-		t.Errorf("Expected ClassificationName to remain %s, got %s", name, vi.ClassificationName)
-	}
-
-	// Fourth update with equally high priority (should overwrite or stay same)
-	newName := nameHardOutage
-	newCol := color.RGBA{255, 50, 50, 255}
-	e.updateHierarchicalRates(prefix, newName, "JP", newCol, nil)
-	if vi.ClassificationName != newName {
-		t.Errorf("Expected ClassificationName to change to %s, got %s", newName, vi.ClassificationName)
-	}
-}
 
 func TestGetPriority(t *testing.T) {
 	e := &Engine{}

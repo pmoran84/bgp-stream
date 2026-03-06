@@ -237,7 +237,6 @@ type Engine struct {
 	ActiveHubs []*VisualHub
 
 	prefixImpactHistory    []map[string]int
-	prefixToASN            map[string]uint32
 	prefixToClassification map[string]ClassificationType
 	currentAnomalies       map[ClassificationType]map[string]int
 	VisualImpact           map[string]*VisualImpact
@@ -1842,32 +1841,6 @@ func (e *Engine) getClassificationUIColor(name string) color.RGBA {
 		return ColorUpdUI
 	default:
 		return ColorGossipUI
-	}
-}
-
-func (e *Engine) updateHierarchicalRates(prefix, name, cc string, c color.RGBA, ld *LeakDetail) {
-	vi, ok := e.VisualImpact[prefix]
-	if !ok {
-		vi = &VisualImpact{Prefix: prefix, CCs: make(map[string]struct{})}
-		e.VisualImpact[prefix] = vi
-	}
-	if vi.CCs == nil {
-		vi.CCs = make(map[string]struct{})
-	}
-	if cc != "" {
-		vi.CCs[cc] = struct{}{}
-	}
-	if name != "" {
-		// Only update classification if it's higher priority than what we have
-		if e.GetPriority(name) >= e.GetPriority(vi.ClassificationName) {
-			vi.ClassificationName = name
-			vi.ClassificationColor = c
-			if ld != nil {
-				vi.LeakType = ld.Type
-				vi.LeakerASN = ld.LeakerASN
-				vi.VictimASN = ld.VictimASN
-			}
-		}
 	}
 }
 
