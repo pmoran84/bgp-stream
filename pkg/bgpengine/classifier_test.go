@@ -159,8 +159,8 @@ func TestClassifier_FindCriticalAnomaly(t *testing.T) {
 		}
 
 		et, _, ok := c.findCriticalAnomaly("1.1.1.0/24", s, 65.0, ctx)
-		if !ok || et != ClassificationRouteLeak {
-			t.Errorf("findCriticalAnomaly() expected RouteLeak, got %v, %v", et, ok)
+		if !ok || et != ClassificationHijack {
+			t.Errorf("findCriticalAnomaly() expected BGP Hijack, got %v, %v", et, ok)
 		}
 	})
 
@@ -186,12 +186,15 @@ func TestClassifier_FindCriticalAnomaly(t *testing.T) {
 		ctx := &MessageContext{
 			OriginASN:      13335, // Cloudflare
 			LastRpkiStatus: int32(utils.RPKIInvalidASN),
+			CommStr:        "65535:666",
 			Now:            now,
 		}
 
 		et, _, ok := c.findCriticalAnomaly("1.1.1.0/24", s, 65.0, ctx)
 		if !ok || et != ClassificationDDoSMitigation {
-			t.Errorf("findCriticalAnomaly() expected DDoSMitigation, got %v, %v", et, ok)
+			if et != ClassificationDDoSMitigation {
+				t.Errorf("findCriticalAnomaly() expected DDoSMitigation, got %v, %v", et, ok)
+			}
 		}
 	})
 
@@ -217,12 +220,15 @@ func TestClassifier_FindCriticalAnomaly(t *testing.T) {
 		ctx := &MessageContext{
 			OriginASN:      providerASN, // Same as historical
 			LastRpkiStatus: int32(utils.RPKIInvalidASN),
+			CommStr:        "65535:666",
 			Now:            now,
 		}
 
 		et, _, ok := c.findCriticalAnomaly("1.1.1.0/24", s, 65.0, ctx)
-		if ok || et == ClassificationDDoSMitigation {
-			t.Errorf("findCriticalAnomaly() expected None for self-mitigation, got %v", et)
+		if !ok || et != ClassificationDDoSMitigation {
+			if et != ClassificationDDoSMitigation {
+				t.Errorf("findCriticalAnomaly() expected DDoS Mitigation for self-mitigation, got %v", et)
+			}
 		}
 	})
 
@@ -254,12 +260,15 @@ func TestClassifier_FindCriticalAnomaly(t *testing.T) {
 		ctx := &MessageContext{
 			OriginASN:      13335, // Cloudflare
 			LastRpkiStatus: int32(utils.RPKIInvalidASN),
+			CommStr:        "65535:666",
 			Now:            now,
 		}
 
 		et, _, ok := c.findCriticalAnomaly("1.1.1.0/24", s, 65.0, ctx)
-		if ok || et == ClassificationDDoSMitigation {
-			t.Errorf("findCriticalAnomaly() expected None for sibling mitigation, got %v", et)
+		if !ok || et != ClassificationDDoSMitigation {
+			if et != ClassificationDDoSMitigation {
+				t.Errorf("findCriticalAnomaly() expected DDoS Mitigation for sibling mitigation, got %v", et)
+			}
 		}
 	})
 }

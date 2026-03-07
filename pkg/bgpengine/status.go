@@ -589,7 +589,7 @@ func (e *Engine) aggregateMetrics(s *MetricSnapshot) (good, poly, bad, crit int)
 	// Policy (Purple)
 	poly = s.Hunting + s.TE + s.Oscill
 	// Bad (Orange)
-	bad = s.LinkFlap + s.AggFlap + s.NextHop
+	bad = s.Flap
 	// Critical (Red)
 	crit = s.Outage + s.Leak + s.DDoS
 	return
@@ -792,16 +792,15 @@ func (e *Engine) updateMetricSnapshots(interval float64) {
 		Research: int(e.windowResearch),
 		Security: int(e.windowSecurity),
 
-		LinkFlap: int(e.windowLinkFlap),
-		AggFlap:  int(e.windowAggFlap),
-		Oscill:   int(e.windowOscill),
-		Hunting:  int(e.windowHunting),
-		TE:       int(e.windowTE),
-		NextHop:  int(e.windowNextHop),
-		Outage:   int(e.windowOutage),
-		Leak:     int(e.windowLeak),
-		Global:   int(e.windowGlobal),
-		DDoS:     int(e.windowDDoS),
+		Flap:    int(e.windowFlap),
+		TE:      int(e.windowTE),
+		Hunting: int(e.windowHunting),
+		Outage:  int(e.windowOutage),
+		Leak:    int(e.windowLeak),
+		Global:  int(e.windowGlobal),
+		DDoS:    int(e.windowDDoS),
+		Hijack:  int(e.windowHijack),
+		Bogon:   int(e.windowBogon),
 	}
 	e.rateNew, e.rateUpd, e.rateWith, e.rateGossip = float64(snap.New)/interval, float64(snap.Upd)/interval, float64(snap.With)/interval, float64(snap.Gossip)/interval
 	e.rateNote, e.ratePeer, e.rateOpen = float64(snap.Note)/interval, float64(snap.Peer)/interval, float64(snap.Open)/interval
@@ -822,9 +821,15 @@ func (e *Engine) updateMetricSnapshots(interval float64) {
 	e.windowResearch = 0
 	e.windowSecurity = 0
 
-	e.windowLinkFlap, e.windowAggFlap, e.windowOscill = 0, 0, 0
-	e.windowHunting, e.windowTE, e.windowNextHop, e.windowOutage = 0, 0, 0, 0
-	e.windowLeak, e.windowGlobal, e.windowDDoS = 0, 0, 0
+	e.windowFlap = 0
+	e.windowTE = 0
+	e.windowHunting = 0
+	e.windowOutage = 0
+	e.windowLeak = 0
+	e.windowGlobal = 0
+	e.windowDDoS = 0
+	e.windowHijack = 0
+	e.windowBogon = 0
 }
 
 func (e *Engine) drawBeaconMetrics(screen *ebiten.Image, x, y, w, h, fontSize, boxH float64) {

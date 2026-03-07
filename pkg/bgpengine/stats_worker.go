@@ -231,9 +231,9 @@ func (e *Engine) calculatePrefixCounts(state *statsWorkerState, allImpact []*Vis
 	clear(state.asnsPerClass)
 
 	allClasses := []ClassificationType{
-		ClassificationRouteLeak, ClassificationOutage, ClassificationLinkFlap,
-		ClassificationNextHopOscillation, ClassificationAggFlap, ClassificationPolicyChurn,
-		ClassificationDDoSMitigation, ClassificationPathLengthOscillation, ClassificationPathHunting,
+		ClassificationRouteLeak, ClassificationOutage, ClassificationFlap,
+		ClassificationFlap, ClassificationFlap, ClassificationTrafficEngineering,
+		ClassificationDDoSMitigation, ClassificationTrafficEngineering, ClassificationPathHunting,
 		ClassificationDiscovery,
 	}
 	for _, ct := range allClasses {

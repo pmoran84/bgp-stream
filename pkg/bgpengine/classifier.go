@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -54,46 +55,38 @@ type LeakDetail struct {
 type ClassificationType int
 
 const (
-	nameLinkFlap        = "Link Flap"
-	nameAggFlap         = "Aggregator Flap"
-	namePathOscillation = "Path Oscillation"
-	namePathHunting     = "Path Hunting"
-	namePolicyChurn     = "Policy Churn"
-	nameNextHopFlap     = "Next-Hop Flap"
-	nameHardOutage      = "Outage"
-	nameRouteLeak       = "Route Leak"
-	nameDiscovery       = "Discovery"
-	nameDDoSMitigation  = "DDoS Mitigation"
+	nameFlap           = "Flap"
+	namePathHunting    = "Path Hunting"
+	nameTrafficEng     = "Traffic Engineering"
+	nameHardOutage     = "Outage"
+	nameRouteLeak      = "Route Leak"
+	nameDiscovery      = "Discovery"
+	nameDDoSMitigation = "DDoS Mitigation"
+	nameHijack         = "BGP Hijack"
+	nameBogon          = "Bogon/Martian"
 )
 
 const (
 	ClassificationNone ClassificationType = iota
-	ClassificationLinkFlap
-	ClassificationAggFlap
-	ClassificationPathLengthOscillation
+	ClassificationFlap
 	ClassificationPathHunting
-	ClassificationPolicyChurn
-	ClassificationNextHopOscillation
+	ClassificationTrafficEngineering
 	ClassificationOutage
 	ClassificationRouteLeak
 	ClassificationDiscovery
 	ClassificationDDoSMitigation
+	ClassificationHijack
+	ClassificationBogon
 )
 
 func (t ClassificationType) String() string {
 	switch t {
-	case ClassificationLinkFlap:
-		return nameLinkFlap
-	case ClassificationAggFlap:
-		return nameAggFlap
-	case ClassificationPathLengthOscillation:
-		return namePathOscillation
+	case ClassificationFlap:
+		return nameFlap
 	case ClassificationPathHunting:
 		return namePathHunting
-	case ClassificationPolicyChurn:
-		return namePolicyChurn
-	case ClassificationNextHopOscillation:
-		return nameNextHopFlap
+	case ClassificationTrafficEngineering:
+		return nameTrafficEng
 	case ClassificationOutage:
 		return nameHardOutage
 	case ClassificationRouteLeak:
@@ -102,6 +95,10 @@ func (t ClassificationType) String() string {
 		return nameDiscovery
 	case ClassificationDDoSMitigation:
 		return nameDDoSMitigation
+	case ClassificationHijack:
+		return nameHijack
+	case ClassificationBogon:
+		return nameBogon
 	default:
 		return "None"
 	}
@@ -258,9 +255,8 @@ func (c *Classifier) ClassifyEvent(prefix string, ctx *MessageContext) (PendingE
 
 func isNormalAnomaly(ct ClassificationType) bool {
 	return ct == ClassificationDiscovery ||
-		ct == ClassificationPolicyChurn ||
-		ct == ClassificationPathHunting ||
-		ct == ClassificationPathLengthOscillation
+		ct == ClassificationTrafficEngineering ||
+		ct == ClassificationPathHunting
 }
 
 func (c *Classifier) handleWithdrawal(state *bgpproto.PrefixState, bucket *bgpproto.StatsBucket, ctx *MessageContext) {
@@ -426,11 +422,11 @@ func (c *Classifier) evaluatePrefixState(prefix string, state *bgpproto.PrefixSt
 
 func (c *Classifier) getPriority(t ClassificationType) int {
 	switch t {
-	case ClassificationRouteLeak, ClassificationOutage, ClassificationDDoSMitigation:
+	case ClassificationRouteLeak, ClassificationOutage, ClassificationDDoSMitigation, ClassificationHijack, ClassificationBogon:
 		return 3 // Critical
-	case ClassificationLinkFlap, ClassificationNextHopOscillation, ClassificationAggFlap:
+	case ClassificationFlap:
 		return 2 // Bad
-	case ClassificationPolicyChurn, ClassificationPathLengthOscillation, ClassificationPathHunting:
+	case ClassificationTrafficEngineering, ClassificationPathHunting:
 		return 1 // Normal
 	default:
 		return 0 // Discovery
@@ -536,6 +532,11 @@ func (c *Classifier) findCriticalAnomaly(prefix string, s *prefixStats, elapsed 
 	withdrawnHostCount := len(s.withdrawnHosts)
 	totalKnownPeers := peerCount + withdrawnPeerCount
 
+	// 0. Bogon Detection
+	if c.isBogon(prefix, ctx) {
+		return ClassificationBogon, nil, true
+	}
+
 	// Outage heuristic based on host diversity and total peers tracking the prefix
 	if s.totalAnn == 0 && elapsed > 60 {
 		if totalKnownPeers > 0 && peerCount == 0 {
@@ -551,6 +552,11 @@ func (c *Classifier) findCriticalAnomaly(prefix string, s *prefixStats, elapsed 
 				}
 			}
 		}
+	}
+
+	// 0.5 RTBH Detection
+	if c.isRTBH(prefix, ctx) {
+		return ClassificationDDoSMitigation, nil, true
 	}
 
 	// 1. Hijack Detection (RPKI Signal)
@@ -576,16 +582,6 @@ func (c *Classifier) detectHijack(prefix string, peerCount, hostCount int, ctx *
 	expectedASN := historicalASN
 	if expectedASN == 0 && c.rpki != nil {
 		expectedASN = c.rpki.GetExpectedASN(prefix)
-	}
-
-	if c.isDDoSProvider(ctx.OriginASN) {
-		if expectedASN == 0 || expectedASN == ctx.OriginASN || c.isSibling(ctx.OriginASN, expectedASN) {
-			return ClassificationNone, nil, false
-		}
-		return ClassificationDDoSMitigation, &LeakDetail{
-			LeakerASN: ctx.OriginASN,
-			VictimASN: expectedASN,
-		}, true
 	}
 
 	// Transition Hijack (Highest Signal)
@@ -616,7 +612,7 @@ func (c *Classifier) detectTransitionHijack(prefix string, peerCount, hostCount 
 		}
 		log.Printf("[!!! HIJACK TRANSITION !!!] Prefix: %s, New Origin: AS%d (%s), Prev Origin: AS%d (%s), RPKI: InvalidASN, Consensus: %d peers/%d hosts",
 			prefix, originASN, nameNew, historicalASN, namePrev, peerCount, hostCount)
-		return ClassificationRouteLeak, &LeakDetail{
+		return ClassificationHijack, &LeakDetail{
 			Type:      LeakReOrigination,
 			LeakerASN: originASN,
 			VictimASN: historicalASN,
@@ -642,7 +638,7 @@ func (c *Classifier) detectNewPrefixHijack(prefix string, peerCount, hostCount i
 		}
 		log.Printf("[!!! HIJACK NEW PREFIX !!!] Prefix: %s, Origin: AS%d (%s), RPKI: InvalidASN, Expected Origin: AS%d (%s), Consensus: %d peers/%d hosts",
 			prefix, originASN, nameLeaker, expectedASN, nameVictim, peerCount, hostCount)
-		return ClassificationRouteLeak, &LeakDetail{
+		return ClassificationHijack, &LeakDetail{
 			Type:      LeakReOrigination,
 			LeakerASN: originASN,
 			VictimASN: expectedASN,
@@ -878,18 +874,11 @@ func (c *Classifier) isCloud(asn uint32) bool {
 }
 
 func (c *Classifier) findBadAnomaly(s *prefixStats, elapsed float64) (ClassificationType, bool) {
-	isAggFlap := s.totalAgg >= 10 && float64(s.totalAgg)/elapsed > 0.05
 	isNextHopOsc := len(s.uniqueHops) > 1 && s.totalHop >= 10 && s.totalPath <= 2
 	isLinkFlap := s.totalWith >= 5 && float64(s.totalAnn)/float64(s.totalWith) < 2.0
 
-	if isAggFlap {
-		return ClassificationAggFlap, true
-	}
-	if isNextHopOsc {
-		return ClassificationNextHopOscillation, true
-	}
-	if isLinkFlap {
-		return ClassificationLinkFlap, true
+	if isNextHopOsc || isLinkFlap {
+		return ClassificationFlap, true
 	}
 
 	return ClassificationNone, false
@@ -903,11 +892,8 @@ func (c *Classifier) findNormalAnomaly(s *prefixStats, elapsed float64) (Classif
 	if isPathHunting {
 		return ClassificationPathHunting, true
 	}
-	if isPolicyChurn {
-		return ClassificationPolicyChurn, true
-	}
-	if isPathLengthOsc {
-		return ClassificationPathLengthOscillation, true
+	if isPolicyChurn || isPathLengthOsc {
+		return ClassificationTrafficEngineering, true
 	}
 
 	// Discovery as the catch-all for high volume activity (>= 25 messages)
@@ -1013,4 +999,72 @@ func (c *Classifier) GetClassificationStats() (stats map[ClassificationType]int,
 	}
 
 	return statsCopy, c.totalClassificationEvents
+}
+
+func (c *Classifier) isBogon(prefix string, ctx *MessageContext) bool {
+	// Check AS Path for Private ASNs
+	if ctx.PathStr != "" {
+		fields := strings.Fields(strings.Trim(ctx.PathStr, "[]"))
+		for _, f := range fields {
+			var asn uint32
+			if _, err := fmt.Sscanf(f, "%d", &asn); err == nil {
+				// Private ASNs: 64512-65534, 4200000000-4294967294
+				if (asn >= 64512 && asn <= 65534) || (asn >= 4200000000 && asn <= 4294967294) {
+					return true
+				}
+			}
+		}
+	}
+
+	// Check for bogon prefixes
+	pfx, err := netip.ParsePrefix(prefix)
+	if err != nil {
+		return false
+	}
+
+	ip := pfx.Addr()
+	if ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsPrivate() {
+		return true
+	}
+
+	// TEST-NET-1, TEST-NET-2, TEST-NET-3
+	// 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+	if ip.Is4() {
+		b := ip.As4()
+		if b[0] == 192 && b[1] == 0 && b[2] == 2 {
+			return true
+		}
+		if b[0] == 198 && b[1] == 51 && b[2] == 100 {
+			return true
+		}
+		if b[0] == 203 && b[1] == 0 && b[2] == 113 {
+			return true
+		}
+
+		// Carrier-grade NAT 100.64.0.0/10
+		if b[0] == 100 && (b[1]&0b11000000) == 64 {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (c *Classifier) isRTBH(prefix string, ctx *MessageContext) bool {
+	// Look for standard RTBH community
+	if strings.Contains(ctx.CommStr, "65535:666") {
+		return true
+	}
+
+	// Or look for /32 (IPv4) or /128 (IPv6)
+	pfx, err := netip.ParsePrefix(prefix)
+	if err != nil {
+		return false
+	}
+
+	if (pfx.Addr().Is4() && pfx.Bits() == 32) || (pfx.Addr().Is6() && pfx.Bits() == 128) {
+		return true
+	}
+
+	return false
 }

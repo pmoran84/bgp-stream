@@ -209,10 +209,11 @@ type Engine struct {
 	windowNote, windowPeer, windowOpen             int64
 	windowBeacon                                   int64
 
-	windowLinkFlap, windowAggFlap, windowOscill          int64
-	windowHunting, windowTE, windowNextHop, windowOutage int64
-	windowLeak, windowGlobal, windowDDoS                 int64
-	windowHoneypot, windowResearch, windowSecurity       int64
+	windowFlap, windowTE, windowOscill             int64
+	windowHunting, windowNextHop, windowOutage     int64
+	windowLeak, windowHijack, windowBogon          int64
+	windowGlobal, windowDDoS                       int64
+	windowHoneypot, windowResearch, windowSecurity int64
 
 	rateNew, rateUpd, rateWith, rateGossip float64
 	rateNote, ratePeer, rateOpen           float64
@@ -421,9 +422,9 @@ type MetricSnapshot struct {
 	New, Upd, With, Gossip, Note, Peer, Open int
 	Beacon, Honeypot, Research, Security     int
 
-	LinkFlap, AggFlap, Oscill               int
-	Hunting, TE, NextHop, Outage            int
-	Leak, Attr, Global, DDoS, Dedupe, Uncat int
+	Flap, TE, Oscill                                       int
+	Hunting, NextHop, Outage                               int
+	Leak, Hijack, Bogon, Attr, Global, DDoS, Dedupe, Uncat int
 }
 
 type asnGroup struct {
@@ -540,17 +541,17 @@ func NewEngine(width, height int, scale float64) *Engine {
 		{"DISCOVERY", 0, ColorDiscovery, ColorGossipUI, func(s MetricSnapshot) int { return s.Global }},
 		{"POLICY CHURN", 0, ColorPolicy, ColorUpdUI, func(s MetricSnapshot) int { return s.TE }},
 		{"PATH HUNTING", 0, ColorPolicy, ColorUpdUI, func(s MetricSnapshot) int { return s.Hunting }},
-		{"PATH OSCILLATION", 0, ColorPolicy, ColorUpdUI, func(s MetricSnapshot) int { return s.Oscill }},
+		{"TRAFFIC ENG", 0, ColorPolicy, ColorUpdUI, func(s MetricSnapshot) int { return s.TE }},
 
 		// Column 2: Bad (Orange)
-		{"AGGREGATOR FLAP", 0, ColorBad, ColorBad, func(s MetricSnapshot) int { return s.AggFlap }},
-		{"NEXT-HOP FLAP", 0, ColorBad, ColorBad, func(s MetricSnapshot) int { return s.NextHop }},
-		{"LINK FLAP", 0, ColorBad, ColorBad, func(s MetricSnapshot) int { return s.LinkFlap }},
+		{"FLAP", 0, ColorBad, ColorBad, func(s MetricSnapshot) int { return s.Flap }},
 
 		// Column 3: Critical (Red)
 		{"DDOS MITIGATION", 0, ColorOutage, ColorWithUI, func(s MetricSnapshot) int { return s.DDoS }},
 		{"ROUTE LEAK", 0, ColorLeak, ColorWithUI, func(s MetricSnapshot) int { return s.Leak }},
 		{"OUTAGE", 0, ColorOutage, ColorWithUI, func(s MetricSnapshot) int { return s.Outage }},
+		{"BGP HIJACK", 0, ColorCritical, ColorWithUI, func(s MetricSnapshot) int { return s.Hijack }},
+		{"BOGON / MARTIAN", 0, ColorCritical, ColorWithUI, func(s MetricSnapshot) int { return s.Bogon }},
 	}
 
 	return e
@@ -1417,7 +1418,7 @@ func (e *Engine) processEventLocked(ev *bgpEvent) {
 	e.incrementCityBuffer(ev.lat, ev.lng, c, shape)
 
 	// 4. Record to CriticalStream if it's a critical anomaly
-	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation {
+	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation || ev.classificationType == ClassificationHijack || ev.classificationType == ClassificationBogon {
 		e.recordToCriticalStream(ev, c, name)
 	}
 
@@ -1617,7 +1618,7 @@ func (e *Engine) updateExistingCriticalEvent(ce *CriticalEvent, ev *bgpEvent) bo
 	}
 
 	// Update IP Impact
-	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation {
+	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation || ev.classificationType == ClassificationHijack || ev.classificationType == ClassificationBogon {
 		if ce.ImpactedPrefixes == nil {
 			ce.ImpactedPrefixes = make(map[string]struct{})
 		}
@@ -1673,7 +1674,7 @@ func (e *Engine) createCriticalEvent(ev *bgpEvent, c color.RGBA, name, asnStr, o
 		Locations:        newLoc,
 		ImpactedPrefixes: make(map[string]struct{}),
 	}
-	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation {
+	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation || ev.classificationType == ClassificationHijack || ev.classificationType == ClassificationBogon {
 		ce.ImpactedPrefixes[ev.prefix] = struct{}{}
 		ce.ImpactedIPs = utils.GetPrefixSize(ev.prefix)
 	}
@@ -1949,22 +1950,20 @@ func (e *Engine) getClassificationVisuals(classificationType ClassificationType)
 		return ColorDiscovery, nameDiscovery, ShapeCircle
 	case ClassificationDiscovery:
 		return ColorDiscovery, nameDiscovery, ShapeCircle
-	case ClassificationPolicyChurn:
-		return ColorPolicy, namePolicyChurn, ShapeCircle
-	case ClassificationPathLengthOscillation:
-		return ColorPolicy, namePathOscillation, ShapeCircle
+	case ClassificationTrafficEngineering:
+		return ColorPolicy, nameTrafficEng, ShapeCircle
 	case ClassificationPathHunting:
 		return ColorPolicy, namePathHunting, ShapeCircle
-	case ClassificationLinkFlap:
-		return ColorBad, nameLinkFlap, ShapeCircle
-	case ClassificationAggFlap:
-		return ColorBad, nameAggFlap, ShapeCircle
-	case ClassificationNextHopOscillation:
-		return ColorBad, nameNextHopFlap, ShapeCircle
+	case ClassificationFlap:
+		return ColorBad, nameFlap, ShapeCircle
 	case ClassificationOutage:
 		return ColorOutage, nameHardOutage, ShapeCircle
 	case ClassificationRouteLeak:
 		return ColorCritical, nameRouteLeak, ShapeFlare
+	case ClassificationHijack:
+		return ColorCritical, nameHijack, ShapeFlare
+	case ClassificationBogon:
+		return ColorCritical, nameBogon, ShapeFlare
 	case ClassificationDDoSMitigation:
 		return ColorOutage, nameDDoSMitigation, ShapeSquare
 	default:
@@ -1976,9 +1975,9 @@ func (e *Engine) GetPriority(name string) int {
 	switch name {
 	case nameRouteLeak, nameHardOutage, nameDDoSMitigation:
 		return 3 // Critical (Red)
-	case nameLinkFlap, nameNextHopFlap, nameAggFlap:
+	case nameFlap:
 		return 2 // Bad (Orange)
-	case namePolicyChurn, namePathOscillation, namePathHunting:
+	case nameTrafficEng, namePathHunting:
 		return 1 // Normalish (Purple)
 	default:
 		return 0 // Discovery (Blue)
@@ -1989,9 +1988,9 @@ func (e *Engine) getClassificationUIColor(name string) color.RGBA {
 	switch name {
 	case nameRouteLeak, nameHardOutage, nameDDoSMitigation:
 		return ColorWithUI
-	case nameLinkFlap, nameNextHopFlap, nameAggFlap:
+	case nameFlap:
 		return ColorBad // Already pretty bright
-	case namePolicyChurn, namePathOscillation, namePathHunting:
+	case nameTrafficEng, namePathHunting:
 		return ColorUpdUI
 	default:
 		return ColorGossipUI
@@ -2011,21 +2010,19 @@ func (e *Engine) updateWindowedMetrics(eventType EventType, classificationType C
 	}
 
 	switch classificationType {
-	case ClassificationLinkFlap:
-		e.windowLinkFlap++
-	case ClassificationAggFlap:
-		e.windowAggFlap++
-	case ClassificationPathLengthOscillation:
-		e.windowOscill++
+	case ClassificationFlap:
+		e.windowFlap++
+	case ClassificationTrafficEngineering:
+		e.windowTE++
 	case ClassificationPathHunting:
 		e.windowHunting++
-	case ClassificationPolicyChurn:
-		e.windowTE++
-	case ClassificationNextHopOscillation:
-		e.windowNextHop++
 	case ClassificationOutage:
 		e.windowOutage++
 	case ClassificationRouteLeak:
+	case ClassificationHijack:
+		e.windowHijack++
+	case ClassificationBogon:
+		e.windowBogon++
 		e.windowLeak++
 	case ClassificationDDoSMitigation:
 		e.windowDDoS++
