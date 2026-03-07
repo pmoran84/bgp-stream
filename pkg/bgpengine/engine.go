@@ -1420,7 +1420,7 @@ func (e *Engine) processEventLocked(ev *bgpEvent) {
 	e.incrementCityBuffer(ev.lat, ev.lng, c, shape)
 
 	// 4. Record to CriticalStream if it's a critical anomaly
-	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation || ev.classificationType == ClassificationHijack || ev.classificationType == ClassificationBogon {
+	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation || ev.classificationType == ClassificationHijack {
 		e.recordToCriticalStream(ev, c, name)
 	}
 
@@ -1558,7 +1558,7 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 
 				// If the new state is ALSO critical, it will be added as a new event below
 				// (or matched to another existing event of that type)
-				if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation || ev.classificationType == ClassificationHijack || ev.classificationType == ClassificationBogon {
+				if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation || ev.classificationType == ClassificationHijack {
 					// Fallthrough to add/match for the NEW critical type
 					break
 				}
@@ -1596,7 +1596,7 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 						}
 					}
 				}
-				if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation || ev.classificationType == ClassificationHijack || ev.classificationType == ClassificationBogon {
+				if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation || ev.classificationType == ClassificationHijack {
 					break
 				}
 				return
@@ -1689,7 +1689,7 @@ func (e *Engine) updateExistingCriticalEvent(ce *CriticalEvent, ev *bgpEvent) bo
 	}
 
 	// Update IP Impact
-	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation || ev.classificationType == ClassificationHijack || ev.classificationType == ClassificationBogon {
+	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation || ev.classificationType == ClassificationHijack {
 		if ce.ImpactedPrefixes == nil {
 			ce.ImpactedPrefixes = make(map[string]struct{})
 		}
@@ -1745,7 +1745,7 @@ func (e *Engine) createCriticalEvent(ev *bgpEvent, c color.RGBA, name, asnStr, o
 		Locations:        newLoc,
 		ImpactedPrefixes: make(map[string]struct{}),
 	}
-	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation || ev.classificationType == ClassificationHijack || ev.classificationType == ClassificationBogon {
+	if ev.classificationType == ClassificationOutage || ev.classificationType == ClassificationRouteLeak || ev.classificationType == ClassificationDDoSMitigation || ev.classificationType == ClassificationHijack {
 		ce.ImpactedPrefixes[ev.prefix] = struct{}{}
 		ce.ImpactedIPs = utils.GetPrefixSize(ev.prefix)
 	}
