@@ -1536,54 +1536,7 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 	// and remove it from that old event if so.
 	if ev.prefix != "" {
 		_, currentAnomName, _ := e.getClassificationVisuals(ev.classificationType)
-
-		// Check stream
-		for i, ce := range e.CriticalStream {
-			if ce.ImpactedPrefixes != nil {
-				if _, ok := ce.ImpactedPrefixes[ev.prefix]; ok {
-					if currentAnomName != ce.Anom {
-						delete(ce.ImpactedPrefixes, ev.prefix)
-						size := utils.GetPrefixSize(ev.prefix)
-						if ce.ImpactedIPs >= size {
-							ce.ImpactedIPs -= size
-						} else {
-							ce.ImpactedIPs = 0
-						}
-						e.updateCriticalEventCacheStrs(ce)
-						e.streamDirty = true
-
-						// If no prefixes remain, remove the event from the stream
-						if len(ce.ImpactedPrefixes) == 0 {
-							e.CriticalStream = append(e.CriticalStream[:i], e.CriticalStream[i+1:]...)
-						}
-					}
-					break // A prefix can only be in one event
-				}
-			}
-		}
-
-		// Check queue
-		for i, ce := range e.criticalQueue {
-			if ce.ImpactedPrefixes != nil {
-				if _, ok := ce.ImpactedPrefixes[ev.prefix]; ok {
-					if currentAnomName != ce.Anom {
-						delete(ce.ImpactedPrefixes, ev.prefix)
-						size := utils.GetPrefixSize(ev.prefix)
-						if ce.ImpactedIPs >= size {
-							ce.ImpactedIPs -= size
-						} else {
-							ce.ImpactedIPs = 0
-						}
-						e.updateCriticalEventCacheStrs(ce)
-
-						if len(ce.ImpactedPrefixes) == 0 {
-							e.criticalQueue = append(e.criticalQueue[:i], e.criticalQueue[i+1:]...)
-						}
-					}
-					break
-				}
-			}
-		}
+		e.removePrefixFromOldEvents(ev.prefix, currentAnomName)
 	}
 
 	// If the event is not critical itself, we are done
@@ -1593,7 +1546,7 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 
 	// Check for duplicates across the entire visible stream
 	for _, ce := range e.CriticalStream {
-		if e.isSameEvent(ce, ev, name, orgID) {
+		if e.isSameEvent(ce, ev, name) {
 			ce.Timestamp = now // Reset expiration timer
 			// If we found an existing event, update it in place
 			if e.updateExistingCriticalEvent(ce, ev) {
@@ -1606,7 +1559,7 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 
 	// Also check for duplicates in the pending queue
 	for _, ce := range e.criticalQueue {
-		if e.isSameEvent(ce, ev, name, orgID) {
+		if e.isSameEvent(ce, ev, name) {
 			ce.Timestamp = now // Reset expiration timer
 			// If we found an existing event, update it in place
 			if e.updateExistingCriticalEvent(ce, ev) {
@@ -1634,7 +1587,47 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 	e.streamUpdatedAt = now
 }
 
-func (e *Engine) isSameEvent(ce *CriticalEvent, ev *bgpEvent, name, orgID string) bool {
+func (e *Engine) removePrefixFromOldEvents(prefix, currentAnomName string) {
+	if prefix == "" {
+		return
+	}
+	if e.removeFromCriticalSlice(&e.CriticalStream, prefix, currentAnomName) {
+		e.streamDirty = true
+		return
+	}
+	e.removeFromCriticalSlice(&e.criticalQueue, prefix, currentAnomName)
+}
+
+func (e *Engine) removeFromCriticalSlice(slice *[]*CriticalEvent, prefix, currentAnomName string) bool {
+	for i := 0; i < len(*slice); i++ {
+		ce := (*slice)[i]
+		if ce.ImpactedPrefixes != nil {
+			if _, ok := ce.ImpactedPrefixes[prefix]; ok {
+				if currentAnomName != ce.Anom {
+					e.removePrefixFromEvent(ce, prefix)
+					if len(ce.ImpactedPrefixes) == 0 {
+						*slice = append((*slice)[:i], (*slice)[i+1:]...)
+					}
+				}
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (e *Engine) removePrefixFromEvent(ce *CriticalEvent, prefix string) {
+	delete(ce.ImpactedPrefixes, prefix)
+	size := utils.GetPrefixSize(prefix)
+	if ce.ImpactedIPs >= size {
+		ce.ImpactedIPs -= size
+	} else {
+		ce.ImpactedIPs = 0
+	}
+	e.updateCriticalEventCacheStrs(ce)
+}
+
+func (e *Engine) isSameEvent(ce *CriticalEvent, ev *bgpEvent, name string) bool {
 	if ce.Anom != name {
 		return false
 	}
