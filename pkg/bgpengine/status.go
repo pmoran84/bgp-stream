@@ -110,14 +110,9 @@ func (e *Engine) drawAnomalySummary(screen *ebiten.Image, xBase, yBase, boxW, bo
 		e.impactDirty = false
 	}
 
-	now := e.Now()
-	isGlitching := now.Sub(e.impactUpdatedAt) < 1*time.Second
-	intensity := 0.0
-	if isGlitching {
-		intensity = 1.0 - (now.Sub(e.impactUpdatedAt).Seconds() / 1.0)
-	}
-
-	e.drawGlitchImage(screen, e.impactBuffer, xBase-10, yBase-fontSize-15, intensity, isGlitching)
+	op := &ebiten.DrawImageOptions{}
+	op.GeoM.Translate(xBase-10, yBase-fontSize-15)
+	screen.DrawImage(e.impactBuffer, op)
 }
 
 func (e *Engine) drawAnomalySummaryContent(localX, localY, scaledBoxW, fontSize float64, textOp *text.DrawOptions) {
@@ -729,7 +724,6 @@ func (e *Engine) StartMetricsLoop() {
 	uiTicks := 0
 	logTicks := 0
 	lastUIUpdate := e.Now()
-	firstRun := true
 
 	run := func() {
 		e.metricsMu.Lock()
@@ -754,14 +748,10 @@ func (e *Engine) StartMetricsLoop() {
 		}
 
 		uiTicks++
-		targetTicks := 20
-		if firstRun {
-			targetTicks = 5
-		}
+		targetTicks := 1
 		if uiTicks >= targetTicks {
 			uiInterval := now.Sub(lastUIUpdate).Seconds()
 			lastUIUpdate = now
-			firstRun = false
 			uiTicks = 0
 			e.hubUpdatedAt = now
 			e.impactUpdatedAt = now
