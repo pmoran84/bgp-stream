@@ -676,6 +676,11 @@ func (e *Engine) preloadActiveAnomalies() {
 		}
 
 		if state.ClassifiedType != 0 {
+			// If the anomaly hasn't seen an update in over 24 hours, consider it stale and don't preload it
+			if e.Now().Unix()-state.LastUpdateTs > 86400 {
+				return nil
+			}
+
 			ip := net.IP(k[:4])
 			mask := int(k[4])
 			prefix := fmt.Sprintf("%s/%d", ip.String(), mask)
