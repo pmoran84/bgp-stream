@@ -208,11 +208,19 @@ func TestCriticalStreamExpiration(t *testing.T) {
 		t.Fatalf("Expected 1 event at T=5m, got %d", len(e.CriticalStream))
 	}
 
-	// T=11m: Event should expire even though there was a duplicate at T=5m
+	// T=11m: Event should NOT expire because there was an update at T=5m (11-5 = 6 < 10)
 	e.virtualTime = startTime.Add(11 * time.Minute)
 	e.updateMetrics() // This runs the cleanup logic
 
+	if len(e.CriticalStream) != 1 {
+		t.Errorf("Expected 1 event at T=11m (should not have expired), got %d", len(e.CriticalStream))
+	}
+
+	// T=16m: Event should now expire (16-5 = 11 > 10)
+	e.virtualTime = startTime.Add(16 * time.Minute)
+	e.updateMetrics()
+
 	if len(e.CriticalStream) != 0 {
-		t.Errorf("Expected 0 events at T=11m (expired), got %d", len(e.CriticalStream))
+		t.Errorf("Expected 0 events at T=16m (expired), got %d", len(e.CriticalStream))
 	}
 }

@@ -284,14 +284,8 @@ func (e *Engine) drawCriticalStream(screen *ebiten.Image, margin, yBase, boxW, b
 			e.streamClipBuffer.Clear()
 			currentY := e.streamOffset
 
-			// Filter stream for display
-			displayStream := make([]*CriticalEvent, 0, len(e.CriticalStream))
-			for _, ce := range e.CriticalStream {
-				if ce.Anom == nameHardOutage && ce.ImpactedIPs < 1000 {
-					continue
-				}
-				displayStream = append(displayStream, ce)
-			}
+			// Use all events for display
+			displayStream := e.CriticalStream
 
 			for i, ce := range displayStream {
 				nextY := e.drawCriticalEvent(ce, localX, currentY, boxW, fontSize)
@@ -317,10 +311,10 @@ func (e *Engine) drawCriticalStream(screen *ebiten.Image, margin, yBase, boxW, b
 	}
 
 	now := e.Now()
-	isGlitching := now.Sub(e.streamUpdatedAt) < 1*time.Second
+	isGlitching := now.Sub(e.streamUpdatedAt) < 300*time.Millisecond
 	intensity := 0.0
 	if isGlitching {
-		intensity = 1.0 - (now.Sub(e.streamUpdatedAt).Seconds() / 1.0)
+		intensity = 1.0 - (now.Sub(e.streamUpdatedAt).Seconds() / 0.3)
 	}
 
 	e.drawGlitchImage(screen, e.streamBuffer, margin-10, yBase-fontSize-15, intensity, isGlitching)

@@ -344,3 +344,51 @@ func TestClassifier_FindCriticalAnomaly_DDoS(t *testing.T) {
 		}
 	})
 }
+
+func TestClassifier_OutageRecovery(t *testing.T) {
+	now := time.Now()
+	prefix := "1.1.1.0/24"
+	c := NewClassifier(nil, nil, nil, nil, func(p string) uint32 { return 0 }, utils.NewLRUCache[string, *bgpproto.PrefixState](100), func() time.Time { return now })
+
+	// 1. Simulate Outage
+	ctx := &MessageContext{
+		IsWithdrawal: true,
+		Host:         "h1",
+		Peer:         "p1",
+		Now:          now,
+	}
+
+	// Send enough withdrawals to trigger outage (need multiple messages and time elapsed)
+	for i := 0; i < 10; i++ {
+		now = now.Add(10 * time.Second)
+		ctx.Now = now
+		_, _ = c.ClassifyEvent(prefix, ctx)
+	}
+
+	state, _ := c.GetPrefixState(prefix)
+	state.ClassifiedType = int32(ClassificationOutage)
+	state.ClassifiedTimeTs = now.Unix()
+
+	// Verify it's an outage
+	if ClassificationType(state.ClassifiedType) != ClassificationOutage {
+		t.Fatalf("Expected state to be Outage, got %v", ClassificationType(state.ClassifiedType))
+	}
+
+	// 2. Send Announcement (Recovery)
+	now = now.Add(10 * time.Second)
+	ctx.Now = now
+	ctx.IsWithdrawal = false
+	ctx.OriginASN = 1234
+
+	_, ok := c.ClassifyEvent(prefix, ctx)
+	if !ok {
+		// It might not be classified as anything immediately after recovery,
+		// but the important thing is that the Outage state is cleared.
+	}
+
+	state, _ = c.GetPrefixState(prefix)
+	if ClassificationType(state.ClassifiedType) == ClassificationOutage {
+		t.Errorf("Expected Outage state to be cleared after announcement, but it's still %v", ClassificationType(state.ClassifiedType))
+	}
+}
+

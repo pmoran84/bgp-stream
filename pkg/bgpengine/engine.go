@@ -1526,6 +1526,7 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 	// Check for duplicates across the entire visible stream
 	for _, ce := range e.CriticalStream {
 		if e.isSameEvent(ce, ev, name, orgID) {
+			ce.Timestamp = now // Reset expiration timer
 			// If we found an existing event, update it in place
 			if e.updateExistingCriticalEvent(ce, ev) {
 				e.updateCriticalEventCacheStrs(ce)
@@ -1538,6 +1539,7 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 	// Also check for duplicates in the pending queue
 	for _, ce := range e.criticalQueue {
 		if e.isSameEvent(ce, ev, name, orgID) {
+			ce.Timestamp = now // Reset expiration timer
 			// If we found an existing event, update it in place
 			if e.updateExistingCriticalEvent(ce, ev) {
 				e.updateCriticalEventCacheStrs(ce)
@@ -1555,6 +1557,7 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 	e.criticalCooldown[ev.prefix] = now
 	ce := e.createCriticalEvent(ev, c, name, asnStr, orgID, newLoc, now)
 	e.criticalQueue = append(e.criticalQueue, ce)
+	e.streamUpdatedAt = now
 }
 
 func (e *Engine) isSameEvent(ce *CriticalEvent, ev *bgpEvent, name, orgID string) bool {
@@ -1564,7 +1567,8 @@ func (e *Engine) isSameEvent(ce *CriticalEvent, ev *bgpEvent, name, orgID string
 
 	// For Route Leaks match based on leak details
 	if name == nameRouteLeak && ev.leakDetail != nil {
-		return ce.LeakType == ev.leakDetail.Type && ce.LeakerASN == ev.leakDetail.LeakerASN && ce.VictimASN == ev.leakDetail.VictimASN
+		return (ce.LeakType == LeakUnknown || ce.LeakType == ev.leakDetail.Type) &&
+			ce.LeakerASN == ev.leakDetail.LeakerASN && ce.VictimASN == ev.leakDetail.VictimASN
 	}
 
 	// For DDoS Mitigation, always match by provider/victim pair
@@ -1575,7 +1579,7 @@ func (e *Engine) isSameEvent(ce *CriticalEvent, ev *bgpEvent, name, orgID string
 			leaker = ev.leakDetail.LeakerASN
 			victim = ev.leakDetail.VictimASN
 		}
-		// If both are unknown/0, we can't safely deduplicate across victims
+		// If both are known/0, we can't safely deduplicate across victims
 		if leaker == 0 && victim == 0 {
 			return false
 		}
@@ -1589,12 +1593,6 @@ func (e *Engine) isSameEvent(ce *CriticalEvent, ev *bgpEvent, name, orgID string
 	}
 
 	if asn != 0 && ce.ASN != 0 && asn == ce.ASN {
-		return true
-	}
-
-	// If the current event's ASN is 0, check if it matches the ce.LeakerASN or ce.VictimASN
-	// This helps with DDoS Mitigation and Route Leaks where ce.ASN might be different
-	if asn != 0 && (asn == ce.LeakerASN || asn == ce.VictimASN) {
 		return true
 	}
 
@@ -1729,11 +1727,12 @@ func (e *Engine) updateCriticalStream() {
 		// Prepend to stream
 		e.CriticalStream = append([]*CriticalEvent{ce}, e.CriticalStream...)
 		e.lastCriticalAddedAt = now
+		e.streamUpdatedAt = now
 		e.streamDirty = true
 
 		// Limit size
-		if len(e.CriticalStream) > 20 {
-			e.CriticalStream = e.CriticalStream[:20]
+		if len(e.CriticalStream) > 100 {
+			e.CriticalStream = e.CriticalStream[:100]
 		}
 	}
 }

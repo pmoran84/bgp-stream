@@ -228,12 +228,17 @@ func (c *Classifier) ClassifyEvent(prefix string, ctx *MessageContext) (PendingE
 
 	// If already classified, emit the classification pulse immediately for this peer
 	if state.ClassifiedType != 0 {
-		if ctx.Now.Unix()-state.ClassifiedTimeTs > 600 {
+		// Recovery check: If it was an outage but we are seeing announcements now, reset classification
+		if ClassificationType(state.ClassifiedType) == ClassificationOutage && !ctx.IsWithdrawal {
 			state.ClassifiedType = 0
 			state.ClassifiedTimeTs = 0
 			state.UncategorizedCounted = false
-		} else if !isNormalAnomaly(ClassificationType(state.ClassifiedType)) {
-			// If it's a Normal anomaly, we still allow upgrade to Bad/Critical
+		} else if ctx.Now.Unix()-state.ClassifiedTimeTs > 600 {
+			state.ClassifiedType = 0
+			state.ClassifiedTimeTs = 0
+			state.UncategorizedCounted = false
+		} else {
+			// Always emit updates for ongoing classifications to keep them active in the stream
 			var ld *LeakDetail
 			if state.LeakType != 0 || ClassificationType(state.ClassifiedType) == ClassificationDDoSMitigation {
 				ld = &LeakDetail{
@@ -246,7 +251,7 @@ func (c *Classifier) ClassifyEvent(prefix string, ctx *MessageContext) (PendingE
 				IP:                 c.prefixToIP(prefix),
 				Prefix:             prefix,
 				ASN:                ctx.OriginASN,
-				HistoricalASN:      state.LastOriginAsn,
+				HistoricalASN:      historicalOriginAsn,
 				EventType:          ctx.EventType(),
 				ClassificationType: ClassificationType(state.ClassifiedType),
 				LeakDetail:         ld,
