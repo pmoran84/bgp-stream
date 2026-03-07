@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"net"
 	"net/netip"
 	"strings"
 	"sync"
@@ -210,6 +211,9 @@ func (c *Classifier) ClassifyEvent(prefix string, ctx *MessageContext) (PendingE
 	bucket.TotalMessages++
 
 	historicalOriginAsn := state.LastOriginAsn
+	if historicalOriginAsn == 0 {
+		historicalOriginAsn = c.getHistoricalASN(prefix)
+	}
 
 	if ctx.IsWithdrawal {
 		c.handleWithdrawal(state, bucket, ctx)
@@ -518,11 +522,26 @@ func (c *Classifier) getHistoricalASN(prefix string) uint32 {
 	if c.seenDB == nil {
 		return 0
 	}
+	// Try exact match first
 	val, _ := c.seenDB.Get(prefix)
-	if len(val) < 4 {
+	if len(val) >= 4 {
+		return binary.BigEndian.Uint32(val)
+	}
+
+	// Fallback to longest prefix match (LPM) if it's a new prefix (like /32)
+	ipStr := prefix
+	if strings.Contains(prefix, "/") {
+		ipStr = strings.Split(prefix, "/")[0]
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
 		return 0
 	}
-	return binary.BigEndian.Uint32(val)
+	val, _, err := c.seenDB.Lookup(ip)
+	if err == nil && len(val) >= 4 {
+		return binary.BigEndian.Uint32(val)
+	}
+	return 0
 }
 
 func (c *Classifier) findCriticalAnomaly(prefix string, s *prefixStats, elapsed float64, ctx *MessageContext) (ClassificationType, *LeakDetail, bool) {

@@ -330,7 +330,7 @@ func (e *Engine) drawCriticalEvent(ce *CriticalEvent, x, y, boxW, fontSize float
 	textOp.GeoM.Translate(x+ce.CachedTypeWidth+10, y)
 
 	// Use a distinct color for sub-classifications (Route Leak types, DDoS) or Impact
-	if ce.Anom == nameRouteLeak || ce.Anom == nameHardOutage || ce.Anom == nameDDoSMitigation {
+	if ce.Anom == nameRouteLeak || ce.Anom == nameHardOutage || ce.Anom == nameDDoSMitigation || ce.Anom == nameHijack {
 		textOp.ColorScale.Reset()
 		textOp.ColorScale.Scale(0, 1, 1, 0.9) // Cyan for sub-type or impact
 	} else {
@@ -370,11 +370,11 @@ func (e *Engine) drawCriticalEvent(ce *CriticalEvent, x, y, boxW, fontSize float
 		if ce.CachedLocVal != "" {
 			nextY = e.drawLabeledLine(e.streamClipBuffer, ce.CachedLocLabel, ce.CachedLocVal, e.subMonoFace, x+indent, nextY, boxW-indent-5, fontSize, labelCol, valueCol)
 		}
-	case nameDDoSMitigation:
-		// Provider
+	case nameDDoSMitigation, nameHijack:
+		// Provider/Hijacker
 		nextY = e.drawLabeledLine(e.streamClipBuffer, ce.CachedLeakerLabel, ce.CachedLeakerVal, e.subMonoFace, x+indent, nextY, boxW-indent-5, fontSize, labelCol, valueCol)
 
-		// Impacted
+		// Impacted/Victim
 		nextY = e.drawLabeledLine(e.streamClipBuffer, ce.CachedVictimLabel, ce.CachedVictimVal, e.subMonoFace, x+indent, nextY, boxW-indent-5, fontSize, labelCol, valueCol)
 
 		// Networks line
@@ -587,11 +587,11 @@ func (e *Engine) aggregateMetrics(s *MetricSnapshot) (good, poly, bad, crit int)
 	// Normal (Blue)
 	good = s.Global
 	// Policy (Purple)
-	poly = s.Hunting + s.TE + s.Oscill
+	poly = s.Hunting + s.TE + s.Oscill + s.DDoS
 	// Bad (Orange)
 	bad = s.Flap
 	// Critical (Red)
-	crit = s.Outage + s.Leak + s.DDoS
+	crit = s.Outage + s.Leak + s.Hijack + s.Bogon
 	return
 }
 
@@ -1102,7 +1102,7 @@ func (e *Engine) calculateEventHeight(ce *CriticalEvent, boxW, fontSize float64)
 		if ce.CachedLocVal != "" {
 			h += e.labeledLineHeight(ce.CachedLocLabel, ce.CachedLocVal, e.subMonoFace, detailsW, fontSize)
 		}
-	case nameDDoSMitigation:
+	case nameDDoSMitigation, nameHijack:
 		h += e.labeledLineHeight(ce.CachedLeakerLabel, ce.CachedLeakerVal, e.subMonoFace, detailsW, fontSize)
 		h += e.labeledLineHeight(ce.CachedVictimLabel, ce.CachedVictimVal, e.subMonoFace, detailsW, fontSize)
 		h += e.labeledLineHeight(ce.CachedNetLabel, ce.CachedNetVal, e.subMonoFace, detailsW, fontSize)

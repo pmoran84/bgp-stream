@@ -112,7 +112,7 @@ var (
 	ColorAggFlap        = color.RGBA{255, 140, 0, 255}
 	ColorOscill         = color.RGBA{148, 0, 211, 255}
 	ColorHunting        = color.RGBA{148, 0, 211, 255}
-	ColorDDoSMitigation = color.RGBA{148, 0, 211, 255} // Deep Violet/Purple (Policy)
+	ColorDDoSMitigation = color.RGBA{148, 0, 211, 255} // Purple (Policy)
 
 	// Lighter versions for UI text and trendlines
 	ColorGossipUI         = color.RGBA{135, 206, 250, 255} // Light Sky Blue
@@ -539,7 +539,7 @@ func NewEngine(width, height int, scale float64) *Engine {
 	e.legendRows = []legendRow{
 		// Column 1: Normal (Blue/Purple)
 		{"DISCOVERY", 0, ColorDiscovery, ColorGossipUI, func(s MetricSnapshot) int { return s.Global }},
-		{"POLICY CHURN", 0, ColorPolicy, ColorUpdUI, func(s MetricSnapshot) int { return s.TE }},
+		{"DDOS MITIGATION", 0, ColorDDoSMitigation, ColorDDoSMitigationUI, func(s MetricSnapshot) int { return s.DDoS }},
 		{"PATH HUNTING", 0, ColorPolicy, ColorUpdUI, func(s MetricSnapshot) int { return s.Hunting }},
 		{"TRAFFIC ENG", 0, ColorPolicy, ColorUpdUI, func(s MetricSnapshot) int { return s.TE }},
 
@@ -547,7 +547,6 @@ func NewEngine(width, height int, scale float64) *Engine {
 		{"FLAP", 0, ColorBad, ColorBad, func(s MetricSnapshot) int { return s.Flap }},
 
 		// Column 3: Critical (Red)
-		{"DDOS MITIGATION", 0, ColorOutage, ColorWithUI, func(s MetricSnapshot) int { return s.DDoS }},
 		{"ROUTE LEAK", 0, ColorLeak, ColorWithUI, func(s MetricSnapshot) int { return s.Leak }},
 		{"OUTAGE", 0, ColorOutage, ColorWithUI, func(s MetricSnapshot) int { return s.Outage }},
 		{"BGP HIJACK", 0, ColorCritical, ColorWithUI, func(s MetricSnapshot) int { return s.Hijack }},
@@ -1426,8 +1425,21 @@ func (e *Engine) processEventLocked(ev *bgpEvent) {
 	e.updateWindowedMetrics(ev.eventType, ev.classificationType, ev.prefix, ev.asn)
 
 	// Filter out invalid DDoS Mitigation events from stats so they don't appear in summaries
-	if ev.classificationType == ClassificationDDoSMitigation && (ev.leakDetail == nil || ev.leakDetail.LeakerASN == 0 || ev.leakDetail.VictimASN == 0) {
-		return
+	// We require both provider and victim ASN to be known to show a meaningful summary item.
+	if ev.classificationType == ClassificationDDoSMitigation {
+		providerASN := ev.asn
+		victimASN := ev.historicalASN
+		if ev.leakDetail != nil {
+			if ev.leakDetail.LeakerASN != 0 {
+				providerASN = ev.leakDetail.LeakerASN
+			}
+			if ev.leakDetail.VictimASN != 0 {
+				victimASN = ev.leakDetail.VictimASN
+			}
+		}
+		if providerASN == 0 || victimASN == 0 {
+			return
+		}
 	}
 
 	// 6. Offload remaining heavy stat accumulation to stats worker
@@ -1479,13 +1491,14 @@ func (e *Engine) isIgnoredDDoS(ev *bgpEvent) bool {
 	if victimASN == 0 {
 		victimASN = ev.historicalASN
 	}
-	if victimASN == 0 || victimASN == providerASN {
+
+	// We used to filter out self-mitigation (victim == provider), but
+	// for the Major Event Stream, even self-mitigation via RTBH is a
+	// significant event for the prefix.
+	if victimASN == 0 {
 		return true
 	}
-	// Also check sibling relationship
-	if e.processor != nil && e.processor.workers[0].classifier.isSibling(providerASN, victimASN) {
-		return true
-	}
+
 	return false
 }
 
@@ -1743,7 +1756,7 @@ func (e *Engine) updateCriticalEventCacheStrs(ce *CriticalEvent) {
 		ce.CachedTypeWidth, _ = text.Measure(ce.CachedTypeLabel, e.subMonoFace, 0)
 	}
 
-	if ce.Anom == nameHardOutage || ce.Anom == nameDDoSMitigation || ce.Anom == nameRouteLeak {
+	if ce.Anom == nameHardOutage || ce.Anom == nameDDoSMitigation || ce.Anom == nameRouteLeak || ce.Anom == nameHijack {
 		ce.CachedFirstLine = fmt.Sprintf(" %s IPs Impacted", utils.FormatNumber(ce.ImpactedIPs))
 		if ce.Anom == nameHardOutage {
 			e.cacheOutageStrings(ce)
@@ -1758,7 +1771,7 @@ func (e *Engine) updateCriticalEventCacheStrs(ce *CriticalEvent) {
 		}
 	}
 
-	if ce.ImpactedIPs > 0 && ce.Anom != nameHardOutage && ce.Anom != nameDDoSMitigation {
+	if ce.ImpactedIPs > 0 && ce.Anom != nameHardOutage && ce.Anom != nameDDoSMitigation && ce.Anom != nameHijack {
 		e.cacheImpactStrings(ce)
 	}
 }
@@ -1772,6 +1785,10 @@ func (e *Engine) cacheLeakStrings(ce *CriticalEvent) {
 	victimLabel := "  Impacted: "
 	if ce.Anom == nameDDoSMitigation {
 		leakerLabel = "  Provider: "
+	}
+	if ce.Anom == nameHijack {
+		leakerLabel = "  Hijacker: "
+		victimLabel = "  Victim: "
 	}
 	ce.CachedLeakerLabel = leakerLabel
 	ce.CachedVictimLabel = victimLabel
@@ -1959,13 +1976,13 @@ func (e *Engine) getClassificationVisuals(classificationType ClassificationType)
 	case ClassificationOutage:
 		return ColorOutage, nameHardOutage, ShapeCircle
 	case ClassificationRouteLeak:
-		return ColorCritical, nameRouteLeak, ShapeFlare
+		return ColorCritical, nameRouteLeak, ShapeCircle
 	case ClassificationHijack:
 		return ColorCritical, nameHijack, ShapeFlare
 	case ClassificationBogon:
 		return ColorCritical, nameBogon, ShapeFlare
 	case ClassificationDDoSMitigation:
-		return ColorOutage, nameDDoSMitigation, ShapeSquare
+		return ColorDDoSMitigation, nameDDoSMitigation, ShapeSquare
 	default:
 		return color.RGBA{}, "", ShapeCircle
 	}
@@ -1973,11 +1990,11 @@ func (e *Engine) getClassificationVisuals(classificationType ClassificationType)
 
 func (e *Engine) GetPriority(name string) int {
 	switch name {
-	case nameRouteLeak, nameHardOutage, nameDDoSMitigation:
+	case nameRouteLeak, nameHardOutage, nameHijack:
 		return 3 // Critical (Red)
 	case nameFlap:
 		return 2 // Bad (Orange)
-	case nameTrafficEng, namePathHunting:
+	case nameTrafficEng, namePathHunting, nameDDoSMitigation:
 		return 1 // Normalish (Purple)
 	default:
 		return 0 // Discovery (Blue)
@@ -1986,11 +2003,11 @@ func (e *Engine) GetPriority(name string) int {
 
 func (e *Engine) getClassificationUIColor(name string) color.RGBA {
 	switch name {
-	case nameRouteLeak, nameHardOutage, nameDDoSMitigation:
+	case nameRouteLeak, nameHardOutage, nameHijack:
 		return ColorWithUI
 	case nameFlap:
 		return ColorBad // Already pretty bright
-	case nameTrafficEng, namePathHunting:
+	case nameTrafficEng, namePathHunting, nameDDoSMitigation:
 		return ColorUpdUI
 	default:
 		return ColorGossipUI

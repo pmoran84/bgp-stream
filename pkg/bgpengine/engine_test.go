@@ -12,7 +12,8 @@ func TestGetPriority(t *testing.T) {
 	}{
 		{nameRouteLeak, 3},
 		{nameHardOutage, 3},
-		{nameDDoSMitigation, 3},
+		{nameHijack, 3},
+		{nameDDoSMitigation, 1},
 		{nameFlap, 2},
 		{nameTrafficEng, 1},
 		{nameDiscovery, 0},
