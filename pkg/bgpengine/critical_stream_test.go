@@ -18,10 +18,10 @@ func TestCriticalStreamDeduplication(t *testing.T) {
 	c := color.RGBA{255, 0, 0, 255}
 	name := nameHardOutage
 
-	// Event 1: Outage for ASN 1234, prefix 1.1.1.0/24
+	// Event 1: Outage for ASN 1234, prefix 1.1.0.0/16
 	ev1 := &bgpEvent{
 		classificationType: ClassificationOutage,
-		prefix:             "1.1.1.0/24",
+		prefix:             "1.1.0.0/16",
 		asn:                1234,
 		cc:                 "US",
 	}
@@ -39,10 +39,10 @@ func TestCriticalStreamDeduplication(t *testing.T) {
 		t.Fatalf("Expected 1 event in stream, got %d", len(e.CriticalStream))
 	}
 
-	// Event 2: Same outage (same ASN), different prefix 1.1.2.0/24
+	// Event 2: Same outage (same ASN), different prefix 1.2.0.0/16
 	ev2 := &bgpEvent{
 		classificationType: ClassificationOutage,
-		prefix:             "1.1.2.0/24",
+		prefix:             "1.2.0.0/16",
 		asn:                1234,
 		cc:                 "US",
 	}
@@ -52,10 +52,10 @@ func TestCriticalStreamDeduplication(t *testing.T) {
 		t.Errorf("Expected 1 event after deduplication, got %d", len(e.CriticalStream))
 	}
 
-	// Event 3: Outage with ASN 5678, prefix 2.2.1.0/24
+	// Event 3: Outage with ASN 5678, prefix 2.2.0.0/16
 	ev3 := &bgpEvent{
 		classificationType: ClassificationOutage,
-		prefix:             "2.2.1.0/24",
+		prefix:             "2.2.0.0/16",
 		asn:                5678,
 		cc:                 "FR",
 	}
@@ -70,7 +70,7 @@ func TestCriticalStreamDeduplication(t *testing.T) {
 	// Event 4: Outage with ASN 0 (unknown) - should be ignored now
 	ev4 := &bgpEvent{
 		classificationType: ClassificationOutage,
-		prefix:             "2.2.2.0/24",
+		prefix:             "2.3.0.0/16",
 		asn:                0,
 		historicalASN:      5678,
 		cc:                 "FR",
@@ -81,11 +81,11 @@ func TestCriticalStreamDeduplication(t *testing.T) {
 		t.Errorf("Expected 2 events (ASN 0 ignored), got %d", len(e.CriticalStream))
 	}
 
-	// Event 5: DDoS Mitigation, Provider 13335, Victim 9999, Prefix 3.3.1.0/24
+	// Event 5: DDoS Mitigation, Provider 13335, Victim 9999, Prefix 3.3.0.0/16
 	nameDDoS := nameDDoSMitigation
 	ev5 := &bgpEvent{
 		classificationType: ClassificationDDoSMitigation,
-		prefix:             "3.3.1.0/24",
+		prefix:             "3.3.0.0/16",
 		asn:                13335,
 		historicalASN:      9999,
 		cc:                 "NL",
@@ -106,7 +106,7 @@ func TestCriticalStreamDeduplication(t *testing.T) {
 	// This should now be deduplicated
 	ev6 := &bgpEvent{
 		classificationType: ClassificationDDoSMitigation,
-		prefix:             "3.3.2.0/24",
+		prefix:             "3.4.0.0/16",
 		asn:                13335,
 		historicalASN:      9999,
 		cc:                 "NL",
@@ -134,18 +134,18 @@ func TestCriticalStreamDeduplication(t *testing.T) {
 	if len(ddosEvent.ImpactedPrefixes) != 2 {
 		t.Errorf("Expected 2 prefixes in DDoS event, got %d", len(ddosEvent.ImpactedPrefixes))
 	}
-	if _, ok := ddosEvent.ImpactedPrefixes["3.3.1.0/24"]; !ok {
-		t.Error("Prefix 3.3.1.0/24 not found in DDoS event")
+	if _, ok := ddosEvent.ImpactedPrefixes["3.3.0.0/16"]; !ok {
+		t.Error("Prefix 3.3.0.0/16 not found in DDoS event")
 	}
-	if _, ok := ddosEvent.ImpactedPrefixes["3.3.2.0/24"]; !ok {
-		t.Error("Prefix 3.3.2.0/24 not found in DDoS event")
+	if _, ok := ddosEvent.ImpactedPrefixes["3.4.0.0/16"]; !ok {
+		t.Error("Prefix 3.4.0.0/16 not found in DDoS event")
 	}
 
 	// Event 7: Cloudflare Self-Mitigation (Provider == Victim)
 	// This was previously ignored, now should be allowed.
 	ev7 := &bgpEvent{
 		classificationType: ClassificationDDoSMitigation,
-		prefix:             "1.1.1.1/32",
+		prefix:             "1.3.0.0/16",
 		asn:                13335,
 		historicalASN:      13335,
 		cc:                 "US",
@@ -187,9 +187,21 @@ func TestCriticalStreamExpiration(t *testing.T) {
 	// T=0: Event 1 arrives
 	ev1 := &bgpEvent{
 		classificationType: ClassificationOutage,
-		prefix:             "1.1.1.0/24",
+		prefix:             "1.1.0.0/16",
 		asn:                1234,
 	}
+	e.recordToCriticalStream(ev1, c, name)
+
+	// Move from queue to stream (need to wait 1s in virtual time)
+	e.virtualTime = startTime.Add(2 * time.Second)
+	e.updateCriticalStream()
+
+	if len(e.CriticalStream) != 1 {
+		t.Fatalf("Expected 1 event in stream at T=2s, got %d", len(e.CriticalStream))
+	}
+
+	// T=5m: Duplicate event arrives
+	e.virtualTime = startTime.Add(5 * time.Minute)
 	e.recordToCriticalStream(ev1, c, name)
 
 	// Move from queue to stream (need to wait 1s in virtual time)

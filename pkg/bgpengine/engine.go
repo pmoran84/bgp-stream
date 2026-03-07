@@ -1548,6 +1548,12 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 		}
 	}
 
+	// Filter out outages with low impact (< 1000 IPs)
+	// We only add NEW outages to the stream if they meet the threshold.
+	if ev.classificationType == ClassificationOutage && utils.GetPrefixSize(ev.prefix) < 1000 {
+		return
+	}
+
 	// Only add a new event if it's not on a per-prefix cooldown
 	// Substantial cooldown: 10 minutes
 	if lastTime, ok := e.criticalCooldown[ev.prefix]; ok && now.Sub(lastTime) < 10*time.Minute {
