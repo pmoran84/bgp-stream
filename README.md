@@ -39,17 +39,17 @@ BGP updates are processed through a multi-stage classification engine:
 The classification engine also maps events into Level 2 categorizations (anomalies) based on heuristics applied over recent activity windows. These fall into three severity tiers:
 
 **Critical (Red)**
-- **Outage:** A prefix sustains at least 3 withdrawals with 0 successful announcements within the evaluation window.
-- **Route Leak:** The AS path violates the valley-free routing principle (e.g., traffic routes from a Tier-1 provider, down to a non-Tier-1/non-Cloud AS, and back up to a Tier-1 provider).
+- **Outage:** A prefix loses all its paths, requiring multiple peers and hosts to withdraw their paths to confirm.
+- **Route Leak:** The AS path violates the valley-free routing principle (e.g., hairpin turns or lateral infections).
+- **DDoS Mitigation:** A prefix is announced with a standard RTBH community (65535:666) or as a highly specific /32 (IPv4) or /128 (IPv6) route.
+- **BGP Hijack:** A prefix is announced with an RPKI invalid status, requiring high consensus among peers and hosts.
+- **Bogon/Martian:** A prefix belongs to a bogon/martian network space or includes private ASNs in its path.
 
 **Bad (Orange)**
-- **Link Flap:** A prefix experiences a high ratio of withdrawals to announcements (more than 5 withdrawals, with an announcement-to-withdrawal ratio of less than 2.5).
-- **Next-Hop Flap:** The prefix is announced with at least 5 next-hop changes across multiple distinct next-hops, but with very little change to the actual AS path length.
-- **Aggregator Flap:** Frequent changes (more than 10) in the AGGREGATOR attribute relative to the prefix's uptime.
+- **Flap:** A prefix experiences rapid toggling of reachability or continuous next-hop oscillation.
 
 **Normal / Policy (Purple & Blue)**
-- **Policy Churn:** Elevated changes in Community, AS Path (without path length changes), MED, or LocalPref attributes, indicating traffic engineering or policy adjustments.
-- **Path Length Oscillation:** Frequent switching between different AS path lengths for the same prefix over a short duration.
+- **Traffic Eng.:** Elevated changes in Community, AS Path, MED, or LocalPref attributes, indicating traffic engineering or policy adjustments.
 - **Path Hunting:** A sequence of announcements with strictly increasing AS path lengths followed by a withdrawal, characteristic of BGP path exploration during convergence.
 - **Discovery (Blue):** Prolonged announcement activity with very few path or withdrawal changes, generally representing standard prefix origination or benign routing noise.
 
