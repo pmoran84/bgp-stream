@@ -16,6 +16,11 @@ type hub struct {
 	rate float64
 }
 
+type windowBucket struct {
+	countryActivity map[string]int
+	anomalyActivity map[ClassificationType]map[string]int
+}
+
 func getMaskLen(prefix string) int {
 	idx := strings.IndexByte(prefix, '/')
 	if idx == -1 {
@@ -34,8 +39,6 @@ type statsEvent struct {
 }
 
 type statsWorkerState struct {
-	countryActivity        map[string]int
-	currentAnomalies       map[ClassificationType]map[string]int
 	prefixToASN            map[string]uint32
 	prefixToClassification map[string]ClassificationType
 	visualImpact           map[string]*VisualImpact
@@ -46,12 +49,14 @@ type statsWorkerState struct {
 	asnGroups       map[asnGroupKey]*asnGroup
 	asnSortedGroups []*asnGroup
 	hubCurrent      []hub
+
+	// Rolling window (60 seconds)
+	buckets    [60]windowBucket
+	currentIdx int
 }
 
 func (e *Engine) runStatsWorker() {
 	state := &statsWorkerState{
-		countryActivity:        make(map[string]int),
-		currentAnomalies:       make(map[ClassificationType]map[string]int),
 		prefixToASN:            make(map[string]uint32),
 		prefixToClassification: make(map[string]ClassificationType),
 		visualImpact:           make(map[string]*VisualImpact),
@@ -61,6 +66,10 @@ func (e *Engine) runStatsWorker() {
 		asnGroups:              make(map[asnGroupKey]*asnGroup),
 		asnSortedGroups:        make([]*asnGroup, 0, 100),
 		hubCurrent:             make([]hub, 0, 300),
+	}
+	for i := range state.buckets {
+		state.buckets[i].countryActivity = make(map[string]int)
+		state.buckets[i].anomalyActivity = make(map[ClassificationType]map[string]int)
 	}
 
 	for msg := range e.statsCh {
@@ -73,18 +82,14 @@ func (e *Engine) runStatsWorker() {
 }
 
 func (e *Engine) processStatsTrigger(msg *statsEvent, state *statsWorkerState) {
-	uiInterval := msg.uiInterval
-	if uiInterval <= 0 {
-		uiInterval = 20.0
-	}
-
-	activeHubs := e.calculateActiveHubs(state, uiInterval)
-	allImpact := e.gatherActiveImpactsWorker(state, uiInterval)
+	// 1. Calculate stats over the rolling 60s window
+	activeHubs := e.calculateActiveHubs(state)
+	allImpact := e.gatherActiveImpactsWorker(state)
 	prefixCounts := e.calculatePrefixCounts(state, allImpact)
 	activeASNImpacts := e.calculateASNImpacts(state, allImpact)
 
+	// 2. Update engine state
 	e.metricsMu.Lock()
-
 	for _, vh := range e.VisualHubs {
 		vh.Active = false
 		vh.TargetAlpha = 0.0
@@ -118,18 +123,28 @@ func (e *Engine) processStatsTrigger(msg *statsEvent, state *statsWorkerState) {
 	e.ActiveASNImpacts = activeASNImpacts
 	e.metricsMu.Unlock()
 
-	clear(state.countryActivity)
-	for _, prefixes := range state.currentAnomalies {
-		clear(prefixes)
+	// 3. Advance the rolling window
+	state.currentIdx = (state.currentIdx + 1) % 60
+	// Clear the next bucket
+	clear(state.buckets[state.currentIdx].countryActivity)
+	for ct := range state.buckets[state.currentIdx].anomalyActivity {
+		clear(state.buckets[state.currentIdx].anomalyActivity[ct])
 	}
-	clear(state.currentAnomalies)
-	clear(state.visualImpact)
 }
 
-func (e *Engine) calculateActiveHubs(state *statsWorkerState, uiInterval float64) []*VisualHub {
+func (e *Engine) calculateActiveHubs(state *statsWorkerState) []*VisualHub {
+	// Aggregate country activity over 60s
+	aggregated := make(map[string]int)
+	for i := 0; i < 60; i++ {
+		for cc, val := range state.buckets[i].countryActivity {
+			aggregated[cc] += val
+		}
+	}
+
 	state.hubCurrent = state.hubCurrent[:0]
-	for cc, val := range state.countryActivity {
-		state.hubCurrent = append(state.hubCurrent, hub{cc, float64(val) / uiInterval})
+	for cc, val := range aggregated {
+		// Rate is messages per second over 60s
+		state.hubCurrent = append(state.hubCurrent, hub{cc, float64(val) / 60.0})
 	}
 	sort.Slice(state.hubCurrent, func(i, j int) bool { return state.hubCurrent[i].rate > state.hubCurrent[j].rate })
 
@@ -189,13 +204,39 @@ func (e *Engine) calculateActiveHubs(state *statsWorkerState, uiInterval float64
 	return activeHubs
 }
 
-func (e *Engine) gatherActiveImpactsWorker(state *statsWorkerState, uiInterval float64) []*VisualImpact {
+func (e *Engine) gatherActiveImpactsWorker(state *statsWorkerState) []*VisualImpact {
 	clear(state.impactMap)
-	// Iterate over all active prefixes that have a classification
+
+	// Aggregate prefix activity over 60s
+	prefixMsgCounts := make(map[string]int)
+	prefixClass := make(map[string]ClassificationType)
+
+	for i := 0; i < 60; i++ {
+		b := &state.buckets[i]
+		for et, prefixes := range b.anomalyActivity {
+			for p, count := range prefixes {
+				prefixMsgCounts[p] += count
+				// Keep the highest priority classification for the prefix seen in the window
+				if e.GetPriority(et.String()) >= e.GetPriority(prefixClass[p].String()) {
+					prefixClass[p] = et
+				}
+			}
+		}
+	}
+
+	// Also include prefixes that are currently classified even if silent in the window
+	// This ensures outages stay in the list until they recover
 	for p, et := range state.prefixToClassification {
 		if et == ClassificationNone {
 			continue
 		}
+		// Only override if not already in prefixClass or if higher priority
+		if e.GetPriority(et.String()) >= e.GetPriority(prefixClass[p].String()) {
+			prefixClass[p] = et
+		}
+	}
+
+	for p, et := range prefixClass {
 		_, name, _ := e.getClassificationVisuals(et)
 		if name == "" {
 			continue
@@ -214,12 +255,8 @@ func (e *Engine) gatherActiveImpactsWorker(state *statsWorkerState, uiInterval f
 			state.impactMap[p] = visI
 		}
 
-		// Add rate based on activity in this window
-		if counts, ok := state.currentAnomalies[et]; ok {
-			if msgCount, exists := counts[p]; exists {
-				visI.Count = float64(msgCount) / uiInterval
-			}
-		}
+		// Rate is messages per second over 60s
+		visI.Count = float64(prefixMsgCounts[p]) / 60.0
 	}
 
 	allImpact := make([]*VisualImpact, 0, len(state.impactMap))
@@ -422,12 +459,13 @@ func (e *Engine) processStatsEvent(msg *statsEvent, state *statsWorkerState) {
 		}
 		state.prefixToClassification[ev.prefix] = ev.classificationType
 
-		// Track activity for this classification in the current UI window
+		// Track activity for this classification in the current rolling window bucket
 		if ev.classificationType != ClassificationNone {
-			if state.currentAnomalies[ev.classificationType] == nil {
-				state.currentAnomalies[ev.classificationType] = make(map[string]int)
+			bucket := &state.buckets[state.currentIdx]
+			if bucket.anomalyActivity[ev.classificationType] == nil {
+				bucket.anomalyActivity[ev.classificationType] = make(map[string]int)
 			}
-			state.currentAnomalies[ev.classificationType][ev.prefix]++
+			bucket.anomalyActivity[ev.classificationType][ev.prefix]++
 		}
 
 		// Update geographic metadata for the prefix
@@ -444,6 +482,6 @@ func (e *Engine) processStatsEvent(msg *statsEvent, state *statsWorkerState) {
 		}
 	}
 	if ev.cc != "" {
-		state.countryActivity[ev.cc]++
+		state.buckets[state.currentIdx].countryActivity[ev.cc]++
 	}
 }
