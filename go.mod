@@ -3,6 +3,7 @@ module github.com/sudorandom/bgp-stream
 go 1.25.0
 
 require (
+	github.com/alecthomas/kong v1.14.0
 	github.com/biter777/countries v1.7.5
 	github.com/cloudflare/ahocorasick v0.0.0-20240916140611-054963ec9396
 	github.com/dgraph-io/badger/v4 v4.9.1
@@ -18,7 +19,6 @@ require (
 )
 
 require (
-	github.com/alecthomas/kong v1.14.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgraph-io/ristretto/v2 v2.4.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
