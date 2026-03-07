@@ -106,18 +106,13 @@ func FormatShortNumber(n uint64) string {
 	if n < 1000 {
 		return strconv.FormatUint(n, 10)
 	}
-	format := func(val float64, suffix string) string {
-		s := fmt.Sprintf("%.1f", val)
-		s = strings.TrimSuffix(s, ".0")
-		return s + suffix
-	}
 	if n < 1000000 {
-		return format(float64(n)/1000, "k")
+		return strconv.FormatUint(n/1000, 10) + "k"
 	}
 	if n < 1000000000 {
-		return format(float64(n)/1000000, "m")
+		return strconv.FormatUint(n/1000000, 10) + "m"
 	}
-	return format(float64(n)/1000000000, "b")
+	return strconv.FormatUint(n/1000000000, 10) + "b"
 }
 
 var ErrNotFound = errors.New("file not found on server")
