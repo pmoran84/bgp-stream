@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -49,10 +50,16 @@ func (c *ReportCmd) Run() error {
 	if err != nil {
 		return fmt.Errorf("failed to open prefix state database: %v", err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Printf("Warning: error closing database: %v", err)
+		}
+	}()
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "PREFIX	STATE	LAST ASN	VICTIM ASN	LEAKER ASN	LAST UPDATE	ACTIVE DURATION	STALE")
+	if _, err := fmt.Fprintln(w, "PREFIX\tSTATE\tLAST ASN\tVICTIM ASN\tLEAKER ASN\tLAST UPDATE\tACTIVE DURATION\tSTALE"); err != nil {
+		return err
+	}
 
 	count := 0
 	now := time.Now().Unix()
@@ -66,45 +73,19 @@ func (c *ReportCmd) Run() error {
 			return nil
 		}
 
-		if state.ClassifiedType != 0 {
-			className := bgpengine.ClassificationType(state.ClassifiedType).String()
-
-			if targetStates[strings.ToLower(className)] {
-				ip := net.IP(k[:4])
-				mask := int(k[4])
-				prefix := fmt.Sprintf("%s/%d", ip.String(), mask)
-
-				lastUpdate := time.Unix(state.LastUpdateTs, 0)
-				duration := time.Duration(now - state.ClassifiedTimeTs) * time.Second
-				
-				isStale := "No"
-				if now - state.LastUpdateTs > 86400 {
-					isStale = "Yes (>24h)"
-				}
-
-				victimASN := "-"
-				if state.VictimAsn != 0 {
-					victimASN = fmt.Sprintf("%d", state.VictimAsn)
-				}
-				
-				leakerASN := "-"
-				if state.LeakerAsn != 0 {
-					leakerASN = fmt.Sprintf("%d", state.LeakerAsn)
-				}
-
-				fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
-					prefix,
-					className,
-					state.LastOriginAsn,
-					victimASN,
-					leakerASN,
-					lastUpdate.Format(time.RFC3339),
-					duration.String(),
-					isStale,
-				)
-				count++
-			}
+		if state.ClassifiedType == 0 {
+			return nil
 		}
+
+		className := bgpengine.ClassificationType(state.ClassifiedType).String()
+		if !targetStates[strings.ToLower(className)] {
+			return nil
+		}
+
+		if err := c.printReportLine(w, k, state, className, now); err != nil {
+			return err
+		}
+		count++
 		return nil
 	})
 
@@ -112,7 +93,46 @@ func (c *ReportCmd) Run() error {
 		return fmt.Errorf("error iterating through database: %v", err)
 	}
 
-	w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+
 	fmt.Printf("\nTotal matched prefixes: %d\n", count)
 	return nil
+}
+
+func (c *ReportCmd) printReportLine(w io.Writer, k []byte, state *bgpproto.PrefixState, className string, now int64) error {
+	ip := net.IP(k[:4])
+	mask := int(k[4])
+	prefix := fmt.Sprintf("%s/%d", ip.String(), mask)
+
+	lastUpdate := time.Unix(state.LastUpdateTs, 0)
+	duration := time.Duration(now-state.ClassifiedTimeTs) * time.Second
+
+	isStale := "No"
+	if now-state.LastUpdateTs > 86400 {
+		isStale = "Yes (>24h)"
+	}
+
+	victimASN := "-"
+	if state.VictimAsn != 0 {
+		victimASN = fmt.Sprintf("%d", state.VictimAsn)
+	}
+
+	leakerASN := "-"
+	if state.LeakerAsn != 0 {
+		leakerASN = fmt.Sprintf("%d", state.LeakerAsn)
+	}
+
+	_, err := fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
+		prefix,
+		className,
+		state.LastOriginAsn,
+		victimASN,
+		leakerASN,
+		lastUpdate.Format(time.RFC3339),
+		duration.String(),
+		isStale,
+	)
+	return err
 }

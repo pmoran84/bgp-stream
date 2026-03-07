@@ -272,9 +272,12 @@ func (c *DebugPrefixCmd) Run() error {
 	u := "wss://ris-live.ripe.net/v1/ws/?client=github.com/sudorandom/bgp-stream-debug"
 	log.Printf("Connecting to %s", u)
 
-	conn, _, err := websocket.DefaultDialer.Dial(u, nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(u, nil)
 	if err != nil {
 		return fmt.Errorf("dial: %v", err)
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
 	}
 	defer func() {
 		_ = conn.Close()
