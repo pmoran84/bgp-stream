@@ -140,6 +140,27 @@ func TestCriticalStreamDeduplication(t *testing.T) {
 	if _, ok := ddosEvent.ImpactedPrefixes["3.3.2.0/24"]; !ok {
 		t.Error("Prefix 3.3.2.0/24 not found in DDoS event")
 	}
+
+	// Event 7: Cloudflare Self-Mitigation (Provider == Victim)
+	// This was previously ignored, now should be allowed.
+	ev7 := &bgpEvent{
+		classificationType: ClassificationDDoSMitigation,
+		prefix:             "1.1.1.1/32",
+		asn:                13335,
+		historicalASN:      13335,
+		cc:                 "US",
+		leakDetail: &LeakDetail{
+			LeakerASN: 13335,
+			VictimASN: 13335,
+		},
+	}
+	e.recordToCriticalStream(ev7, c, nameDDoS)
+	e.lastCriticalAddedAt = time.Now().Add(-2 * time.Second)
+	e.updateCriticalStream()
+
+	if len(e.CriticalStream) != 4 {
+		t.Errorf("Expected 4 events (including Cloudflare self-mitigation), got %d", len(e.CriticalStream))
+	}
 }
 
 type fakeWriteCloser struct{}

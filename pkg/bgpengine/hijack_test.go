@@ -75,7 +75,7 @@ func TestHijackDetection(t *testing.T) {
 				{Peer: "p4", Host: "rrc03", OriginASN: 666, Now: now.Add(3 * time.Second)},
 				{Peer: "p5", Host: "rrc04", OriginASN: 666, Now: now.Add(4 * time.Second)},
 			},
-			expectAnom: ClassificationRouteLeak,
+			expectAnom: ClassificationHijack,
 			setup: func(p *BGPProcessor) {
 				// Prefix was previously seen as AS100
 				asnBytes := make([]byte, 4)

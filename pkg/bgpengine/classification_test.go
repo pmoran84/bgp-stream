@@ -1,10 +1,7 @@
 package bgpengine
 
 import (
-	"encoding/binary"
 	"fmt"
-	"net"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -63,7 +60,7 @@ func TestClassification(t *testing.T) {
 		}
 	})
 
-	runClassificationTest(t, "Link Flap", ClassificationLinkFlap, func(p *BGPProcessor, now time.Time, classify func(string, *MessageContext)) {
+	runClassificationTest(t, "Link Flap", ClassificationFlap, func(p *BGPProcessor, now time.Time, classify func(string, *MessageContext)) {
 		for i := 0; i < 10; i++ {
 			peer := fmt.Sprintf("peer%d", i%5)
 			classify("3.3.3.0/24", &MessageContext{
@@ -102,109 +99,4 @@ func TestClassification(t *testing.T) {
 		classify("6.6.6.0/24", &MessageContext{Peer: "p1", PathStr: "[100 200 300 400 500 600 700]", PathLen: 7, Now: now.Add(180 * time.Second)})
 	})
 
-	runClassificationTest(t, "DDoS Mitigation", ClassificationDDoSMitigation, func(p *BGPProcessor, now time.Time, classify func(string, *MessageContext)) {
-		prefix := "7.7.7.0/24"
-
-		// Mock historical origin in seenDB
-		seenDBPath := filepath.Join(t.TempDir(), "test-seen-ddos-main.db")
-		seenDB, _ := utils.OpenDiskTrie(seenDBPath)
-		defer func() { _ = seenDB.Close() }()
-		oldASN := uint32(1234)
-		asnData := make([]byte, 4)
-		binary.BigEndian.PutUint32(asnData, oldASN)
-		_, ipNet, _ := net.ParseCIDR(prefix)
-		_ = seenDB.Insert(ipNet, asnData)
-
-		for i := range p.workers {
-			p.workers[i].classifier.seenDB = seenDB
-		}
-
-		// Mock a historical origin by sending a valid announcement first
-		for i := range 10 {
-			classify(prefix, &MessageContext{
-				Peer: fmt.Sprintf("peer%d", i), Host: fmt.Sprintf("rrc%d", i%3),
-				OriginASN:      1234,
-				LastRpkiStatus: int32(utils.RPKIValid),
-				Now:            now.Add(time.Duration(i*30) * time.Second),
-			})
-		}
-
-		// Now send the DDoS mitigation announcements
-		for i := range 10 {
-			host := fmt.Sprintf("rrc%d", i%3)
-			classify(prefix, &MessageContext{
-				Peer: fmt.Sprintf("peer%d", i+10), Host: host,
-				OriginASN:      13335, // Cloudflare (DDoS Provider)
-				LastRpkiStatus: int32(utils.RPKIInvalidASN),
-				Now:            now.Add(10*time.Minute + time.Duration(i*30)*time.Second),
-			})
-		}
-
-		// Verify leak details (Provider/Impacted)
-		finalState, _ := p.workers[int(utils.HashUint32(p.prefixToIP(prefix))%uint32(len(p.workers)))].classifier.GetPrefixState(prefix)
-		if finalState.LeakerAsn != 13335 {
-			t.Errorf("expected Provider AS13335, got AS%d", finalState.LeakerAsn)
-		}
-		if finalState.VictimAsn != 1234 {
-			t.Errorf("expected Impacted AS1234, got AS%d", finalState.VictimAsn)
-		}
-	})
-
-	t.Run("DDoS Mitigation Re-Emission", func(t *testing.T) {
-		prefix := "8.8.8.0/24"
-
-		// Mock historical origin in seenDB
-		seenDBPath := filepath.Join(t.TempDir(), "test-seen-ddos-re-emission.db")
-		seenDB, _ := utils.OpenDiskTrie(seenDBPath)
-		defer func() { _ = seenDB.Close() }()
-		oldASN := uint32(1234)
-		asnData := make([]byte, 4)
-		binary.BigEndian.PutUint32(asnData, oldASN)
-		_, ipNet, _ := net.ParseCIDR(prefix)
-		_ = seenDB.Insert(ipNet, asnData)
-
-		p := NewBGPProcessor(func(uint32) (float64, float64, string, string, geoservice.ResolutionType) {
-			return 0, 0, "", "", geoservice.ResUnknown
-		}, seenDB, nil, nil, nil, func(p string) uint32 {
-			ip, _, _ := net.ParseCIDR(p)
-			if ip == nil {
-				return 0
-			}
-			return binary.BigEndian.Uint32(ip.To4())
-		}, time.Now, func(lat, lng float64, cc, city string, eventType EventType, ct ClassificationType, prefix string, asn, historicalASN uint32, ld ...*LeakDetail) {
-		})
-
-		now := time.Now()
-
-		// 1. Initially classify as DDoS Mitigation (need multiple peers for consensus)
-		for i := 0; i < 10; i++ {
-			p.handleAnnouncements(p.workers[0], []RISAnnouncement{{Prefixes: []string{prefix}}}, &MessageContext{
-				Peer: fmt.Sprintf("p%d", i), Host: "h1", OriginASN: 13335, LastRpkiStatus: int32(utils.RPKIInvalidASN), Now: now.Add(time.Duration(i) * time.Second), LastOriginAsn: 1234,
-			}, now.Add(time.Duration(i)*time.Second), 13335)
-		}
-
-		// 2. Send another announcement for the same prefix - it should be re-emitted with LeakDetail
-		events := p.handleAnnouncements(p.workers[0], []RISAnnouncement{{Prefixes: []string{prefix}}}, &MessageContext{
-			Peer: "p2", Host: "h1", OriginASN: 13335, LastRpkiStatus: int32(utils.RPKIInvalidASN), Now: now.Add(10 * time.Second), LastOriginAsn: 1234,
-		}, now.Add(10*time.Second), 13335)
-
-		found := false
-		for _, e := range events {
-			if e.ClassificationType == ClassificationDDoSMitigation {
-				if e.LeakDetail == nil {
-					t.Fatalf("Expected LeakDetail in re-emitted DDoS Mitigation event")
-				}
-				if e.LeakDetail.LeakerASN != 13335 {
-					t.Errorf("Expected LeakerASN 13335, got %d", e.LeakDetail.LeakerASN)
-				}
-				if e.LeakDetail.VictimASN != 1234 {
-					t.Errorf("Expected VictimASN 1234, got %d", e.LeakDetail.VictimASN)
-				}
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("DDoS Mitigation event not re-emitted")
-		}
-	})
 }

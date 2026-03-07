@@ -330,7 +330,7 @@ func (e *Engine) drawCriticalEvent(ce *CriticalEvent, x, y, boxW, fontSize float
 	textOp.GeoM.Translate(x+ce.CachedTypeWidth+10, y)
 
 	// Use a distinct color for sub-classifications (Route Leak types, DDoS) or Impact
-	if ce.Anom == nameRouteLeak || ce.Anom == nameHardOutage || ce.Anom == nameDDoSMitigation {
+	if ce.Anom == nameRouteLeak || ce.Anom == nameHardOutage || ce.Anom == nameDDoSMitigation || ce.Anom == nameHijack {
 		textOp.ColorScale.Reset()
 		textOp.ColorScale.Scale(0, 1, 1, 0.9) // Cyan for sub-type or impact
 	} else {
@@ -370,11 +370,11 @@ func (e *Engine) drawCriticalEvent(ce *CriticalEvent, x, y, boxW, fontSize float
 		if ce.CachedLocVal != "" {
 			nextY = e.drawLabeledLine(e.streamClipBuffer, ce.CachedLocLabel, ce.CachedLocVal, e.subMonoFace, x+indent, nextY, boxW-indent-5, fontSize, labelCol, valueCol)
 		}
-	case nameDDoSMitigation:
-		// Provider
+	case nameDDoSMitigation, nameHijack:
+		// Provider/Hijacker
 		nextY = e.drawLabeledLine(e.streamClipBuffer, ce.CachedLeakerLabel, ce.CachedLeakerVal, e.subMonoFace, x+indent, nextY, boxW-indent-5, fontSize, labelCol, valueCol)
 
-		// Impacted
+		// Impacted/Victim
 		nextY = e.drawLabeledLine(e.streamClipBuffer, ce.CachedVictimLabel, ce.CachedVictimVal, e.subMonoFace, x+indent, nextY, boxW-indent-5, fontSize, labelCol, valueCol)
 
 		// Networks line
@@ -587,11 +587,11 @@ func (e *Engine) aggregateMetrics(s *MetricSnapshot) (good, poly, bad, crit int)
 	// Normal (Blue)
 	good = s.Global
 	// Policy (Purple)
-	poly = s.Hunting + s.TE + s.Oscill
+	poly = s.Hunting + s.TE + s.Oscill + s.DDoS
 	// Bad (Orange)
-	bad = s.LinkFlap + s.AggFlap + s.NextHop
+	bad = s.Flap
 	// Critical (Red)
-	crit = s.Outage + s.Leak + s.DDoS
+	crit = s.Outage + s.Leak + s.Hijack + s.Bogon
 	return
 }
 
@@ -792,16 +792,15 @@ func (e *Engine) updateMetricSnapshots(interval float64) {
 		Research: int(e.windowResearch),
 		Security: int(e.windowSecurity),
 
-		LinkFlap: int(e.windowLinkFlap),
-		AggFlap:  int(e.windowAggFlap),
-		Oscill:   int(e.windowOscill),
-		Hunting:  int(e.windowHunting),
-		TE:       int(e.windowTE),
-		NextHop:  int(e.windowNextHop),
-		Outage:   int(e.windowOutage),
-		Leak:     int(e.windowLeak),
-		Global:   int(e.windowGlobal),
-		DDoS:     int(e.windowDDoS),
+		Flap:    int(e.windowFlap),
+		TE:      int(e.windowTE),
+		Hunting: int(e.windowHunting),
+		Outage:  int(e.windowOutage),
+		Leak:    int(e.windowLeak),
+		Global:  int(e.windowGlobal),
+		DDoS:    int(e.windowDDoS),
+		Hijack:  int(e.windowHijack),
+		Bogon:   int(e.windowBogon),
 	}
 	e.rateNew, e.rateUpd, e.rateWith, e.rateGossip = float64(snap.New)/interval, float64(snap.Upd)/interval, float64(snap.With)/interval, float64(snap.Gossip)/interval
 	e.rateNote, e.ratePeer, e.rateOpen = float64(snap.Note)/interval, float64(snap.Peer)/interval, float64(snap.Open)/interval
@@ -822,9 +821,15 @@ func (e *Engine) updateMetricSnapshots(interval float64) {
 	e.windowResearch = 0
 	e.windowSecurity = 0
 
-	e.windowLinkFlap, e.windowAggFlap, e.windowOscill = 0, 0, 0
-	e.windowHunting, e.windowTE, e.windowNextHop, e.windowOutage = 0, 0, 0, 0
-	e.windowLeak, e.windowGlobal, e.windowDDoS = 0, 0, 0
+	e.windowFlap = 0
+	e.windowTE = 0
+	e.windowHunting = 0
+	e.windowOutage = 0
+	e.windowLeak = 0
+	e.windowGlobal = 0
+	e.windowDDoS = 0
+	e.windowHijack = 0
+	e.windowBogon = 0
 }
 
 func (e *Engine) drawBeaconMetrics(screen *ebiten.Image, x, y, w, h, fontSize, boxH float64) {
@@ -1097,7 +1102,7 @@ func (e *Engine) calculateEventHeight(ce *CriticalEvent, boxW, fontSize float64)
 		if ce.CachedLocVal != "" {
 			h += e.labeledLineHeight(ce.CachedLocLabel, ce.CachedLocVal, e.subMonoFace, detailsW, fontSize)
 		}
-	case nameDDoSMitigation:
+	case nameDDoSMitigation, nameHijack:
 		h += e.labeledLineHeight(ce.CachedLeakerLabel, ce.CachedLeakerVal, e.subMonoFace, detailsW, fontSize)
 		h += e.labeledLineHeight(ce.CachedVictimLabel, ce.CachedVictimVal, e.subMonoFace, detailsW, fontSize)
 		h += e.labeledLineHeight(ce.CachedNetLabel, ce.CachedNetVal, e.subMonoFace, detailsW, fontSize)

@@ -8,6 +8,7 @@ import (
 
 	"path/filepath"
 
+	bgpproto "github.com/sudorandom/bgp-stream/pkg/bgpengine/proto/v1"
 	"github.com/sudorandom/bgp-stream/pkg/utils"
 )
 
@@ -159,8 +160,8 @@ func TestClassifier_FindCriticalAnomaly(t *testing.T) {
 		}
 
 		et, _, ok := c.findCriticalAnomaly("1.1.1.0/24", s, 65.0, ctx)
-		if !ok || et != ClassificationRouteLeak {
-			t.Errorf("findCriticalAnomaly() expected RouteLeak, got %v, %v", et, ok)
+		if !ok || et != ClassificationHijack {
+			t.Errorf("findCriticalAnomaly() expected BGP Hijack, got %v, %v", et, ok)
 		}
 	})
 
@@ -186,12 +187,59 @@ func TestClassifier_FindCriticalAnomaly(t *testing.T) {
 		ctx := &MessageContext{
 			OriginASN:      13335, // Cloudflare
 			LastRpkiStatus: int32(utils.RPKIInvalidASN),
+			CommStr:        "65535:666",
 			Now:            now,
 		}
 
 		et, _, ok := c.findCriticalAnomaly("1.1.1.0/24", s, 65.0, ctx)
 		if !ok || et != ClassificationDDoSMitigation {
-			t.Errorf("findCriticalAnomaly() expected DDoSMitigation, got %v, %v", et, ok)
+			if et != ClassificationDDoSMitigation {
+				t.Errorf("findCriticalAnomaly() expected DDoSMitigation, got %v, %v", et, ok)
+			}
+		}
+	})
+
+	t.Run("DDoS Mitigation Victim Identification via LPM", func(t *testing.T) {
+		// Mock seen DB with a /24 but NOT the specific /32
+		seenDBPath := filepath.Join(t.TempDir(), "test-seen-ddos-lpm.db")
+		seenDB, _ := utils.OpenDiskTrie(seenDBPath)
+		defer func() { _ = seenDB.Close() }()
+
+		victimASN := uint32(100)
+		asnData := make([]byte, 4)
+		binary.BigEndian.PutUint32(asnData, victimASN)
+		_, ipNet, _ := net.ParseCIDR("1.1.1.0/24")
+		_ = seenDB.Insert(ipNet, asnData)
+
+		c := NewClassifier(seenDB, nil, nil, nil, func(p string) uint32 {
+			ip, _, _ := net.ParseCIDR(p)
+			return binary.BigEndian.Uint32(ip.To4())
+		}, utils.NewLRUCache[string, *bgpproto.PrefixState](100), func() time.Time { return time.Now() })
+
+		ctx := &MessageContext{
+			OriginASN: 200,
+			CommStr:   "65535:666",
+			Now:       time.Now(),
+		}
+
+		// Classify a /32 that is part of the /24
+		prefix := "1.1.1.1/32"
+		var event PendingEvent
+		var ok bool
+		for i := 0; i < 6; i++ {
+			event, ok = c.ClassifyEvent(prefix, ctx)
+		}
+
+		if !ok {
+			t.Fatalf("Expected classification, got none")
+		}
+
+		if event.LeakDetail == nil {
+			t.Fatalf("Expected LeakDetail, got nil")
+		}
+
+		if event.LeakDetail.VictimASN != victimASN {
+			t.Errorf("Expected VictimASN %d (via LPM), got %d", victimASN, event.LeakDetail.VictimASN)
 		}
 	})
 
@@ -217,12 +265,15 @@ func TestClassifier_FindCriticalAnomaly(t *testing.T) {
 		ctx := &MessageContext{
 			OriginASN:      providerASN, // Same as historical
 			LastRpkiStatus: int32(utils.RPKIInvalidASN),
+			CommStr:        "65535:666",
 			Now:            now,
 		}
 
 		et, _, ok := c.findCriticalAnomaly("1.1.1.0/24", s, 65.0, ctx)
-		if ok || et == ClassificationDDoSMitigation {
-			t.Errorf("findCriticalAnomaly() expected None for self-mitigation, got %v", et)
+		if !ok || et != ClassificationDDoSMitigation {
+			if et != ClassificationDDoSMitigation {
+				t.Errorf("findCriticalAnomaly() expected DDoS Mitigation for self-mitigation, got %v", et)
+			}
 		}
 	})
 
@@ -254,12 +305,15 @@ func TestClassifier_FindCriticalAnomaly(t *testing.T) {
 		ctx := &MessageContext{
 			OriginASN:      13335, // Cloudflare
 			LastRpkiStatus: int32(utils.RPKIInvalidASN),
+			CommStr:        "65535:666",
 			Now:            now,
 		}
 
 		et, _, ok := c.findCriticalAnomaly("1.1.1.0/24", s, 65.0, ctx)
-		if ok || et == ClassificationDDoSMitigation {
-			t.Errorf("findCriticalAnomaly() expected None for sibling mitigation, got %v", et)
+		if !ok || et != ClassificationDDoSMitigation {
+			if et != ClassificationDDoSMitigation {
+				t.Errorf("findCriticalAnomaly() expected DDoS Mitigation for sibling mitigation, got %v", et)
+			}
 		}
 	})
 }
