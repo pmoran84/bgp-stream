@@ -27,8 +27,10 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/text/v2"
 	geojson "github.com/paulmach/go.geojson"
+	bgpproto "github.com/sudorandom/bgp-stream/pkg/bgpengine/proto/v1"
 	"github.com/sudorandom/bgp-stream/pkg/geoservice"
 	"github.com/sudorandom/bgp-stream/pkg/utils"
+	"google.golang.org/protobuf/proto"
 )
 
 type EventType int
@@ -649,9 +651,69 @@ func (e *Engine) LoadRemainingData() error {
 
 	e.processor = NewBGPProcessor(e.GetIPCoords, e.SeenDB, e.StateDB, e.asnMapping, e.RPKI, e.prefixToIP, e.Now, e.recordEvent)
 
+	// Preload anomalies from state DB to initialize the BGP EVENT SUMMARY
+	go e.preloadActiveAnomalies()
+
 	log.Println("Engine startup complete. Listening for events...")
 
 	return nil
+}
+
+func (e *Engine) preloadActiveAnomalies() {
+	if e.StateDB == nil {
+		return
+	}
+
+	log.Println("Preloading active anomalies from StateDB...")
+	count := 0
+	e.StateDB.ForEach(func(k []byte, v []byte) error {
+		if len(k) != 5 {
+			return nil
+		}
+		state := &bgpproto.PrefixState{}
+		if err := proto.Unmarshal(v, state); err != nil {
+			return nil
+		}
+
+		if state.ClassifiedType != 0 {
+			ip := net.IP(k[:4])
+			mask := int(k[4])
+			prefix := fmt.Sprintf("%s/%d", ip.String(), mask)
+
+			c, name, _ := e.getClassificationVisuals(ClassificationType(state.ClassifiedType))
+
+			ipUint := binary.BigEndian.Uint32(k[:4])
+			_, _, cc, city, _ := e.GetIPCoords(ipUint)
+
+			ev := &bgpEvent{
+				prefix:             prefix,
+				classificationType: ClassificationType(state.ClassifiedType),
+				asn:                state.LastOriginAsn,
+				cc:                 cc,
+				city:               city,
+			}
+
+			if state.LeakType != 0 || ClassificationType(state.ClassifiedType) == ClassificationDDoSMitigation {
+				ev.leakDetail = &LeakDetail{
+					Type:      LeakType(state.LeakType),
+					LeakerASN: state.LeakerAsn,
+					VictimASN: state.VictimAsn,
+				}
+			}
+
+			if e.isIgnoredDDoS(ev) {
+				return nil
+			}
+
+			select {
+			case e.statsCh <- &statsEvent{ev: ev, name: name, c: c}:
+				count++
+			default:
+			}
+		}
+		return nil
+	})
+	log.Printf("Finished preloading %d active anomalies.", count)
 }
 
 func (e *Engine) loadPrefixData() error {
