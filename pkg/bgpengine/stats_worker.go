@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/biter777/countries"
 	"github.com/hajimehoshi/ebiten/v2/text/v2"
@@ -39,9 +40,14 @@ type statsEvent struct {
 	trigger    bool
 }
 
+type prefixClassState struct {
+	ct ClassificationType
+	ts time.Time
+}
+
 type statsWorkerState struct {
 	prefixToASN            map[string]uint32
-	prefixToClassification map[string]ClassificationType
+	prefixToClassification map[string]prefixClassState
 	visualImpact           map[string]*VisualImpact
 
 	impactMap       map[string]*VisualImpact
@@ -59,7 +65,7 @@ type statsWorkerState struct {
 func (e *Engine) runStatsWorker() {
 	state := &statsWorkerState{
 		prefixToASN:            make(map[string]uint32),
-		prefixToClassification: make(map[string]ClassificationType),
+		prefixToClassification: make(map[string]prefixClassState),
 		visualImpact:           make(map[string]*VisualImpact),
 		impactMap:              make(map[string]*VisualImpact),
 		countMap:               make(map[string]*PrefixCount),
@@ -227,13 +233,18 @@ func (e *Engine) gatherActiveImpactsWorker(state *statsWorkerState) []*VisualImp
 
 	// Also include prefixes that are currently classified even if silent in the window
 	// This ensures outages stay in the list until they recover
-	for p, et := range state.prefixToClassification {
-		if et == ClassificationNone {
+	now := e.Now()
+	for p, st := range state.prefixToClassification {
+		if now.Sub(st.ts) > 10*time.Minute {
+			delete(state.prefixToClassification, p)
+			continue
+		}
+		if st.ct == ClassificationNone {
 			continue
 		}
 		// Only override if not already in prefixClass or if higher priority
-		if e.GetPriority(et.String()) >= e.GetPriority(prefixClass[p].String()) {
-			prefixClass[p] = et
+		if e.GetPriority(st.ct.String()) >= e.GetPriority(prefixClass[p].String()) {
+			prefixClass[p] = st.ct
 		}
 	}
 
@@ -461,7 +472,10 @@ func (e *Engine) processStatsEvent(msg *statsEvent, state *statsWorkerState) {
 		if ev.asn != 0 {
 			state.prefixToASN[ev.prefix] = ev.asn
 		}
-		state.prefixToClassification[ev.prefix] = ev.classificationType
+		state.prefixToClassification[ev.prefix] = prefixClassState{
+			ct: ev.classificationType,
+			ts: e.Now(),
+		}
 
 		// Track activity for this classification in the current rolling window bucket
 		if ev.classificationType != ClassificationNone {

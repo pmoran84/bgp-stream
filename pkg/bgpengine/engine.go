@@ -1584,7 +1584,6 @@ func (e *Engine) recordToCriticalStream(ev *bgpEvent, c color.RGBA, name string)
 	e.criticalCooldown[ev.prefix] = now
 	ce := e.createCriticalEvent(ev, c, name, asnStr, orgID, newLoc, now)
 	e.criticalQueue = append(e.criticalQueue, ce)
-	e.streamUpdatedAt = now
 }
 
 func (e *Engine) removePrefixFromOldEvents(prefix, currentAnomName string) {
