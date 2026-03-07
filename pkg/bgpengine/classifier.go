@@ -58,7 +58,7 @@ type ClassificationType int
 const (
 	nameFlap           = "Flap"
 	namePathHunting    = "Path Hunting"
-	nameTrafficEng     = "Traffic Engineering"
+	nameTrafficEng     = "Traffic Eng."
 	nameHardOutage     = "Outage"
 	nameRouteLeak      = "Route Leak"
 	nameDiscovery      = "Discovery"
