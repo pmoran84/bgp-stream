@@ -565,13 +565,14 @@ func (c *Classifier) findCriticalAnomaly(prefix string, s *prefixStats, elapsed 
 	if s.totalAnn == 0 && elapsed > 60 {
 		if totalKnownPeers > 0 && peerCount == 0 {
 			if totalKnownPeers <= 5 {
-				// For small prefixes, require a decent number of known peers to have withdrawn
-				if withdrawnPeerCount >= totalKnownPeers {
+				// For small prefixes, require all known peers AND at least 2 distinct hosts to have withdrawn
+				if withdrawnPeerCount >= totalKnownPeers && withdrawnHostCount >= 2 {
 					return ClassificationOutage, nil, true
 				}
 			} else {
 				// For larger prefixes, require substantial evidence
-				if withdrawnPeerCount >= 10 && withdrawnHostCount >= 3 {
+				// At least 20 peers and 5 hosts must report the prefix as withdrawn
+				if withdrawnPeerCount >= 20 && withdrawnHostCount >= 5 {
 					return ClassificationOutage, nil, true
 				}
 			}

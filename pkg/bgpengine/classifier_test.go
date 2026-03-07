@@ -2,6 +2,7 @@ package bgpengine
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -107,10 +108,13 @@ func TestClassifier_FindCriticalAnomaly_Outage(t *testing.T) {
 		s := &prefixStats{
 			totalWith:      30,
 			totalAnn:       0,
-			withdrawnPeers: map[string]bool{"p1": true, "p2": true, "p3": true, "p4": true, "p5": true, "p6": true, "p7": true, "p8": true, "p9": true, "p10": true},
-			withdrawnHosts: map[string]bool{"h1": true, "h2": true, "h3": true},
+			withdrawnPeers: make(map[string]bool),
+			withdrawnHosts: map[string]bool{"h1": true, "h2": true, "h3": true, "h4": true, "h5": true},
 			uniquePeers:    map[string]bool{},
 			uniqueHosts:    map[string]bool{},
+		}
+		for i := 1; i <= 20; i++ {
+			s.withdrawnPeers[fmt.Sprintf("p%d", i)] = true
 		}
 		et, _, ok := c.findCriticalAnomaly("1.1.1.0/24", s, 65.0, &MessageContext{Now: now})
 		if !ok || et != ClassificationOutage {
@@ -122,7 +126,7 @@ func TestClassifier_FindCriticalAnomaly_Outage(t *testing.T) {
 				totalWith:      5,
 				totalAnn:       0,
 				withdrawnPeers: map[string]bool{"p1": true, "p2": true},
-				withdrawnHosts: map[string]bool{"h1": true},
+				withdrawnHosts: map[string]bool{"h1": true, "h2": true},
 				uniquePeers:    map[string]bool{},
 				uniqueHosts:    map[string]bool{},
 			}
