@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -99,6 +100,24 @@ func FormatNumber(n uint64) string {
 		res = append([]string{s}, res...)
 	}
 	return strings.Join(res, ",")
+}
+
+func FormatShortNumber(n uint64) string {
+	if n < 1000 {
+		return strconv.FormatUint(n, 10)
+	}
+	format := func(val float64, suffix string) string {
+		s := fmt.Sprintf("%.1f", val)
+		s = strings.TrimSuffix(s, ".0")
+		return s + suffix
+	}
+	if n < 1000000 {
+		return format(float64(n)/1000, "k")
+	}
+	if n < 1000000000 {
+		return format(float64(n)/1000000, "m")
+	}
+	return format(float64(n)/1000000000, "b")
 }
 
 var ErrNotFound = errors.New("file not found on server")

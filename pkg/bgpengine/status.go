@@ -117,14 +117,16 @@ func (e *Engine) drawAnomalySummary(screen *ebiten.Image, xBase, yBase, boxW, bo
 
 func (e *Engine) drawAnomalySummaryContent(localX, localY, scaledBoxW, fontSize float64, textOp *text.DrawOptions) {
 	currentY := localY + 5.0
-	// Layout: [ICON] [ANOMALY NAME] [RATE] [ASNS] [PFXS]
+	// Layout: [ICON] [ANOMALY NAME] [RATE] [ASNS] [PFXS] [IPS]
 	col1X := localX + 5.0 + (fontSize * 1.2)
-	col4X := localX + scaledBoxW - 40.0
+	col5X := localX + scaledBoxW - 45.0
+	col4X := col5X - 60.0
 	col3X := col4X - 60.0
 	col2X := col3X - 80.0
 
 	if e.Width > 2000 {
-		col4X = localX + scaledBoxW - 80.0
+		col5X = localX + scaledBoxW - 90.0
+		col4X = col5X - 120.0
 		col3X = col4X - 120.0
 		col2X = col3X - 160.0
 	}
@@ -154,6 +156,12 @@ func (e *Engine) drawAnomalySummaryContent(localX, localY, scaledBoxW, fontSize 
 	textOp.GeoM.Reset()
 	textOp.GeoM.Translate(col4X-hw2/2, currentY)
 	text.Draw(e.impactBuffer, h2, e.subMonoFace, textOp)
+
+	h3 := "IPS"
+	hw3, _ := text.Measure(h3, e.subMonoFace, 0)
+	textOp.GeoM.Reset()
+	textOp.GeoM.Translate(col5X-hw3/2, currentY)
+	text.Draw(e.impactBuffer, h3, e.subMonoFace, textOp)
 
 	currentY += fontSize * 1.1
 
@@ -238,6 +246,18 @@ func (e *Engine) drawAnomalySummaryContent(localX, localY, scaledBoxW, fontSize 
 			textOp.ColorScale.Scale(0.5, 0.5, 0.5, 0.1)
 		}
 		text.Draw(e.impactBuffer, pc.CountStr, e.subMonoFace, textOp)
+
+		// IP Count
+		textOp.GeoM.Reset()
+		textOp.GeoM.Translate(col5X-pc.IPWidth/2, currentY)
+		textOp.ColorScale.Reset()
+		if pc.Count > 0 {
+			textOp.ColorScale.ScaleWithColor(pc.Color)
+		} else {
+			textOp.ColorScale.ScaleWithColor(pc.Color)
+			textOp.ColorScale.Scale(0.5, 0.5, 0.5, 0.1)
+		}
+		text.Draw(e.impactBuffer, pc.IPStr, e.subMonoFace, textOp)
 
 		currentY += fontSize * 1.0
 	}

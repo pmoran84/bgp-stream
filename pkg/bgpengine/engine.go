@@ -368,6 +368,8 @@ type PrefixCount struct {
 	CountStr string
 	ASNCount int
 	ASNStr   string
+	IPCount  uint64
+	IPStr    string
 	Rate     float64
 	RateStr  string
 	Color    color.RGBA
@@ -377,6 +379,7 @@ type PrefixCount struct {
 	RateWidth  float64
 	ASNWidth   float64
 	CountWidth float64
+	IPWidth    float64
 }
 
 type ASNImpact struct {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/biter777/countries"
 	"github.com/hajimehoshi/ebiten/v2/text/v2"
+	"github.com/sudorandom/bgp-stream/pkg/utils"
 )
 
 type hub struct {
@@ -299,6 +300,7 @@ func (e *Engine) calculatePrefixCounts(state *statsWorkerState, allImpact []*Vis
 		if pc, ok := state.countMap[visI.ClassificationName]; ok {
 			pc.Count++
 			pc.Rate += visI.Count
+			pc.IPCount += utils.GetPrefixSize(visI.Prefix)
 		}
 		m, ok := state.asnsPerClass[visI.ClassificationName]
 		if !ok {
@@ -313,11 +315,13 @@ func (e *Engine) calculatePrefixCounts(state *statsWorkerState, allImpact []*Vis
 		pc.ASNCount = len(state.asnsPerClass[name])
 		pc.ASNStr = strconv.Itoa(pc.ASNCount)
 		pc.CountStr = strconv.Itoa(pc.Count)
+		pc.IPStr = utils.FormatShortNumber(pc.IPCount)
 		pc.RateStr = fmt.Sprintf("%.0f", pc.Rate)
 
 		pc.RateWidth, _ = text.Measure(pc.RateStr, e.subMonoFace, 0)
 		pc.ASNWidth, _ = text.Measure(pc.ASNStr, e.subMonoFace, 0)
 		pc.CountWidth, _ = text.Measure(pc.CountStr, e.subMonoFace, 0)
+		pc.IPWidth, _ = text.Measure(pc.IPStr, e.subMonoFace, 0)
 		prefixCounts = append(prefixCounts, *pc)
 	}
 
