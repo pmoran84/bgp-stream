@@ -951,6 +951,66 @@ func (c *Classifier) isDDoSProvider(asn uint32) bool {
 	return scrubbers[asn]
 }
 
+func (c *Classifier) detectTrafficRedirection(ctx *MessageContext, historicalOriginAsn uint32) (*LeakDetail, bool) {
+	if ctx.PathStr == "" {
+		return nil, false
+	}
+
+	fields := strings.Fields(strings.Trim(ctx.PathStr, "[]"))
+	if len(fields) < 1 {
+		return nil, false
+	}
+
+	var originAsn uint32
+	if _, err := fmt.Sscanf(fields[len(fields)-1], "%d", &originAsn); err != nil {
+		return nil, false
+	}
+
+	// If the origin ASN is a known scrubber and it's not the historical origin,
+	// it's a strong signal of traffic redirection.
+	if historicalOriginAsn != 0 && originAsn != historicalOriginAsn && c.isDDoSProvider(originAsn) {
+		return &LeakDetail{Type: DDoSTrafficRedirection, LeakerASN: originAsn, VictimASN: historicalOriginAsn}, true
+	}
+
+	// Check for AS-path prepending first to find the true origin and the upstream provider
+	// Example path: [1234 19324 5678 5678 5678] -> true origin is 5678, upstream is 19324
+	trueOriginAsn := originAsn
+	upstreamIdx := -1
+
+	for i := len(fields) - 2; i >= 0; i-- {
+		var asn uint32
+		if _, err := fmt.Sscanf(fields[i], "%d", &asn); err != nil {
+			continue
+		}
+		if asn != trueOriginAsn {
+			upstreamIdx = i
+			break
+		}
+	}
+
+	// Alternatively, check if the upstream is a known scrubber,
+	// which indicates redirection to a scrubbing center before reaching the victim.
+	if upstreamIdx >= 0 {
+		var upstreamAsn uint32
+		if _, err := fmt.Sscanf(fields[upstreamIdx], "%d", &upstreamAsn); err != nil {
+			return nil, false
+		}
+
+		if c.isDDoSProvider(upstreamAsn) {
+			// We need to be careful with Tier-1s as upstream.
+			// A simple heuristic is: look for AS-path prepending (victim prepending)
+			// along with a scrubber upstream. Prepending means the origin ASN appears
+			// multiple times consecutively at the end.
+			prepending := (len(fields) - 1) - upstreamIdx
+			if prepending >= 2 { // Origin ASN repeated at least twice (1 prepends + 1 original)
+				return &LeakDetail{Type: DDoSTrafficRedirection, LeakerASN: upstreamAsn, VictimASN: trueOriginAsn}, true
+			}
+		}
+	}
+
+	return nil, false
+}
+
 func (c *Classifier) detectDDoSMitigation(prefix string, ctx *MessageContext, historicalOriginAsn uint32) (*LeakDetail, bool) {
 	// Flowspec: look for traffic-rate in communities or specific flowspec communities
 	if strings.Contains(ctx.CommStr, "traffic-rate:") || strings.Contains(ctx.CommStr, "traffic-action:") {
@@ -967,50 +1027,5 @@ func (c *Classifier) detectDDoSMitigation(prefix string, ctx *MessageContext, hi
 	// Traffic Redirection: look for scrubbing center characteristics
 	// Heuristic: If the prefix is taken over by a known scrubbing ASN (different from its historical origin),
 	// or the upstream provider changes to a scrubbing ASN while the origin remains the same but with prepending.
-	if ctx.PathStr != "" {
-		fields := strings.Fields(strings.Trim(ctx.PathStr, "[]"))
-		if len(fields) >= 1 {
-			var originAsn uint32
-			fmt.Sscanf(fields[len(fields)-1], "%d", &originAsn)
-
-			// If the origin ASN is a known scrubber and it's not the historical origin,
-			// it's a strong signal of traffic redirection.
-			if historicalOriginAsn != 0 && originAsn != historicalOriginAsn && c.isDDoSProvider(originAsn) {
-				return &LeakDetail{Type: DDoSTrafficRedirection, LeakerASN: originAsn, VictimASN: historicalOriginAsn}, true
-			}
-
-			// Check for AS-path prepending first to find the true origin and the upstream provider
-			// Example path: [1234 19324 5678 5678 5678] -> true origin is 5678, upstream is 19324
-			trueOriginAsn := originAsn
-			upstreamIdx := -1
-
-			for i := len(fields) - 2; i >= 0; i-- {
-				var asn uint32
-				fmt.Sscanf(fields[i], "%d", &asn)
-				if asn != trueOriginAsn {
-					upstreamIdx = i
-					break
-				}
-			}
-
-			// Alternatively, check if the upstream is a known scrubber,
-			// which indicates redirection to a scrubbing center before reaching the victim.
-			if upstreamIdx >= 0 {
-				var upstreamAsn uint32
-				fmt.Sscanf(fields[upstreamIdx], "%d", &upstreamAsn)
-				if c.isDDoSProvider(upstreamAsn) {
-					// We need to be careful with Tier-1s as upstream.
-					// A simple heuristic is: look for AS-path prepending (victim prepending)
-					// along with a scrubber upstream. Prepending means the origin ASN appears
-					// multiple times consecutively at the end.
-					prepending := (len(fields) - 1) - upstreamIdx
-					if prepending >= 2 { // Origin ASN repeated at least twice (1 prepends + 1 original)
-						return &LeakDetail{Type: DDoSTrafficRedirection, LeakerASN: upstreamAsn, VictimASN: trueOriginAsn}, true
-					}
-				}
-			}
-		}
-	}
-
-	return nil, false
+	return c.detectTrafficRedirection(ctx, historicalOriginAsn)
 }
