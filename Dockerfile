@@ -35,6 +35,9 @@ RUN apt-get update && apt-get install -y \
     libxi6 \
     libgl1 \
     libxxf86vm1 \
+    libgl1-mesa-dri \
+    mesa-vulkan-drivers \
+    mesa-utils \
     xvfb \
     ffmpeg \
     ca-certificates \

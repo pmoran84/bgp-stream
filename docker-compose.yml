@@ -15,7 +15,7 @@ services:
     restart: "no"
 
   # ─────────────────────────────────────────────
-  # Paso 2: Visualizador con ventana gráfica (X11)
+  # Paso 2: Visualizador con GPU Intel (aceleración por hardware)
   # Requiere correr antes: xhost +local:docker
   # ─────────────────────────────────────────────
   viewer:
@@ -23,12 +23,17 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: bgp-viewer
-    command: bgp-viewer -width 1920 -height 1080 -scale 400
+    command: bgp-viewer -width 1920 -height 1080 -scale 400 -minimal-ui
     environment:
       - DISPLAY=${DISPLAY}
+      - LIBGL_ALWAYS_SOFTWARE=0
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix
       - bgp-data:/data
+    devices:
+      - /dev/dri:/dev/dri   # acceso a la GPU Intel
+    group_add:
+      - video                # permisos para acceder al dispositivo
     restart: unless-stopped
 
   # ─────────────────────────────────────────────
@@ -51,6 +56,10 @@ services:
     volumes:
       - bgp-data:/data
       - ./captures:/data/captures
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
     restart: unless-stopped
 
   # ─────────────────────────────────────────────
@@ -74,6 +83,10 @@ services:
     volumes:
       - bgp-data:/data
       - ./captures:/data/captures
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
     restart: "no"
 
 volumes:
