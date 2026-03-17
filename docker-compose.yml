@@ -1,0 +1,81 @@
+services:
+
+  # ─────────────────────────────────────────────
+  # Paso 1: Descarga los datos de geolocalización
+  # Correr una sola vez: docker compose run --rm data-fetcher
+  # ─────────────────────────────────────────────
+  data-fetcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bgp-data-fetcher
+    command: bgp-cli fetch
+    volumes:
+      - bgp-data:/data
+    restart: "no"
+
+  # ─────────────────────────────────────────────
+  # Paso 2: Visualizador con ventana gráfica (X11)
+  # Requiere correr antes: xhost +local:docker
+  # ─────────────────────────────────────────────
+  viewer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bgp-viewer
+    command: bgp-viewer -width 1920 -height 1080 -scale 400
+    environment:
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - bgp-data:/data
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # Alternativa: Modo headless con Xvfb (sin pantalla)
+  # Activar con: docker compose --profile headless up viewer-headless
+  # ─────────────────────────────────────────────
+  viewer-headless:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bgp-viewer-headless
+    profiles:
+      - headless
+    command: >
+      bash -c "
+        Xvfb :99 -screen 0 1920x1080x24 &
+        export DISPLAY=:99
+        exec bgp-viewer -width 1920 -height 1080 -scale 400 -minimal-ui
+      "
+    volumes:
+      - bgp-data:/data
+      - ./captures:/data/captures
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # Alternativa: Grabación de video con ffmpeg
+  # Activar con: docker compose --profile record up viewer-record
+  # El video queda en ./captures/
+  # ─────────────────────────────────────────────
+  viewer-record:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bgp-viewer-record
+    profiles:
+      - record
+    command: >
+      bash -c "
+        Xvfb :99 -screen 0 1920x1080x24 &
+        export DISPLAY=:99
+        exec bgp-viewer -width 1920 -height 1080 -scale 400 -hide-ui -video /data/captures/output.mp4
+      "
+    volumes:
+      - bgp-data:/data
+      - ./captures:/data/captures
+    restart: "no"
+
+volumes:
+  bgp-data:
+    driver: local
